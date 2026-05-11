@@ -1,0 +1,12 @@
+七个json数据
+__pycache__文件
+convert.py
+seed.date.js
+shx_suishu.py
+shuju_loader.py
+shx_prob.py
+test_2_ai.py
+test_1_ai.py
+update_data.py
+prediction_result.json
+prediction_data.js
