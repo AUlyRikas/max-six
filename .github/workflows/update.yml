@@ -1,0 +1,29 @@
+name: 每日更新预测
+on:
+  schedule:
+    - cron: '50 13 * * *'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装依赖
+        run: pip install requests
+      - name: 更新数据并预测
+        run: |
+          rm -f prediction_max.js prediction_max.txt
+          python mark6/shuju_loader.py
+          python core_update_rules.py
+          python core_max.py --output
+          python gen_js.py
+      - name: 提交更新
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .
+          git diff --staged --quiet || git commit -m "自动更新预测 $(TZ='Asia/Shanghai' date +%Y-%m-%d)"
+          git push
