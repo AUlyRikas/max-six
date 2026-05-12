@@ -227,16 +227,31 @@ async function loadHistory(){
     document.getElementById('historyContent').innerHTML='<div class="loading-box">加载历史中...</div>';
     try{
         var resp=await fetch(HISTORY_API);
+        if(!resp.ok) throw new Error('API不可用');
         var json=await resp.json();
-        var arr=json?.data||(Array.isArray(json)?json:null);
-        if(arr&&arr.length){
-            var map=new Map();
-            for(var i=0;i<arr.length;i++){if(!map.has(arr[i].expect))map.set(arr[i].expect,arr[i]);}
-            fullHistoryList=Array.from(map.values()).sort(function(a,b){return parseInt(b.expect)-parseInt(a.expect);});
-            currentPage=1;
-            renderHistory();
-        }else{document.getElementById('historyContent').innerHTML='<div class="loading-box">暂无历史数据</div>';}
-    }catch(e){document.getElementById('historyContent').innerHTML='<div class="loading-box">加载失败: '+e.message+'</div>';}
+        processHistoryData(json);
+    }catch(e){
+        console.log('API失败，加载本地缓存...');
+        fetch('2026.json')
+        .then(function(r){return r.json();})
+        .then(processHistoryData)
+        .catch(function(){
+            document.getElementById('historyContent').innerHTML='<div class="loading-box">历史数据暂不可用</div>';
+        });
+    }
+}
+
+function processHistoryData(json){
+    var arr=json?.data||(Array.isArray(json)?json:null);
+    if(arr&&arr.length){
+        var map=new Map();
+        for(var i=0;i<arr.length;i++){if(!map.has(arr[i].expect))map.set(arr[i].expect,arr[i]);}
+        fullHistoryList=Array.from(map.values()).sort(function(a,b){return parseInt(b.expect)-parseInt(a.expect);});
+        currentPage=1;
+        renderHistory();
+    }else{
+        document.getElementById('historyContent').innerHTML='<div class="loading-box">暂无历史数据</div>';
+    }
 }
 
 // ========== 事件绑定（DOM加载后执行）==========
