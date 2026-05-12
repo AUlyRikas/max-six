@@ -7,7 +7,7 @@ var predictionMaxData = {
   "teSx": "鼠",
   "teWei": 7,
   "nextIssue": "2026132",
-  "kills": ["狗", "虎", "马", "猪", "龙"],
+  "kills": ["虎", "猪", "狗", "龙", "马"],
   "ninePool": ["羊", "猴", "鸡", "鼠", "牛", "兔", "蛇"],
   "sixPool": ["羊", "鼠", "蛇", "鸡", "牛", "兔"],
   "filled": []
