@@ -19,7 +19,6 @@ jobs:
           python mark6/shuju_loader.py
           python core_update_rules.py
           python core_max.py --output
-          python gen_js.py
       - name: 提交更新
         run: |
           git config user.name "GitHub Actions"
