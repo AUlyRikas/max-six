@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-core_max.py — 六肖预测核心模块（直选版 93.75% + 动态命中率 + 预警）
+core_max.py — 六肖预测核心模块（纯规则反向版 94.01%）
 ================================================================================
 架构：
-  1. 规则库给12生肖打分（规则反向得分 + 频率得分 + TOP6加分）
-  2. 直接排序取Top9=九肖、Top6=六肖
-  3. 每次运行自动校验上期预测是否命中，更新动态命中率追踪
-  4. 命中率低于基准线时自动预警
+  1. 规则库七条规则给12生肖打分（杀对率越高扣分越多）
+  2. TOP6加分（规则反向得分前6名额外加20分）
+  3. 纯规则反向得分排序（频率权重=0，不再参与排序）
+  4. 直接取Top9=九肖、Top6=六肖
 
-回测：1981期严格滚动 | 九肖98.69% | 六肖93.75% | 连错≤2期
-================================================================================
+排序公式：
+  综合得分 = 规则反向得分×1.0 + (TOP6加分20分)
+  规则反向得分 = 该生肖被七条规则杀对率累加 + 100
+  频率不再参与排序
+
+回测：1984期严格滚动
+  九肖: 98.74%  最大连错1期  连错1期: 25次
+  六肖: 94.01%  最大连错2期  连错1期: 110次  连错2期: 4次
+  主3肖: 75.33%  最大连错4期  连错≥3: 17次
+
 用法：
   python core_max.py                  → 自检+预测
   python core_max.py --output         → 预测+保存+校验上期命中
@@ -67,11 +75,16 @@ def extract_records(data):
 
 # ==================== 预测核心 ====================
 
-def predict_direct(records, up_to, top_n=6):
-    """直选版：规则反向得分+TOP加分，从12生肖直接排序取TopN"""
+def predict_direct(records, up_to):
+    """
+    纯规则反向得分排序
+    频率权重=0，完全由七条规则的杀对率决定生肖安全性
+    杀对率越高 → 该生肖越危险 → 扣分越多 → 排名越靠后
+    """
     cur_sx = records[up_to - 1]["te_sx"]
     rule_scores = Counter()
 
+    # 1. 七条规则各自对12生肖打分
     if cur_sx in SHAXIAO_RULES:
         for pos_idx, pos_name in enumerate(POS_NAMES):
             if pos_name not in SHAXIAO_RULES[cur_sx]: continue
@@ -79,37 +92,39 @@ def predict_direct(records, up_to, top_n=6):
             if actual_sx in SHAXIAO_RULES[cur_sx][pos_name]:
                 rules = SHAXIAO_RULES[cur_sx][pos_name][actual_sx]
                 for r in rules:
+                    # 每条规则的杀对率累加到被杀生肖上（负分=危险）
                     rule_scores[r[1]] -= r[2]
 
+    # 2. TOP6加分：规则反向得分最高的6个生肖额外加20分
     border = sorted(rule_scores.items(), key=lambda x: x[1], reverse=True)
-    top_bonus = set(s for s, _ in border[:top_n])
+    top_bonus = set(s for s, _ in border[:6])
 
-    freq = Counter(r["te_sx"] for r in records[:up_to])
-    max_f = max(freq.values()) if freq else 1
-
+    # 3. 纯规则反向得分排序（频率权重=0）
     scores = Counter()
     for s in ZODIAC:
-        freq_score = freq.get(s, 0) / max_f * 100 * 0.3
-        rule_score = (rule_scores.get(s, 0) + 100) * 0.7
-        scores[s] = freq_score + rule_score + (20 if s in top_bonus else 0)
+        # 规则反向得分：没被杀的=100分，被杀的=100-杀对率
+        rule_score = rule_scores.get(s, 0) + 100
+        # TOP6加分
+        bonus = 20 if s in top_bonus else 0
+        scores[s] = rule_score + bonus
 
+    # 4. 排序取结果
     sorted_sx = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     nine = [s for s, _ in sorted_sx[:9]]
     six = [s for s, _ in sorted_sx[:6]]
 
-    # 规则杀肖（用于展示，不影响预测）
+    # 规则杀肖（展示用，杀对率低于-90即为高风险）
     kills = set()
     for s, sc in rule_scores.items():
         if sc < -90:
             kills.add(s)
 
-    return six, nine, kills, rule_scores
+    return six, nine, kills
 
 
 # ==================== 命中追踪 ====================
 
 def load_hit_track():
-    """加载历史命中记录"""
     if not os.path.exists(TRACK_FILE):
         return []
     with open(TRACK_FILE, 'r', encoding='utf-8') as f:
@@ -117,18 +132,12 @@ def load_hit_track():
 
 
 def save_hit_track(track):
-    """保存命中记录"""
     os.makedirs(TRACK_DIR, exist_ok=True)
     with open(TRACK_FILE, 'w', encoding='utf-8') as f:
         json.dump(track, f, ensure_ascii=False, indent=2)
 
 
 def verify_last_prediction(records):
-    """
-    校验上一次预测是否命中。
-    逻辑：读取track中最后一条记录，用records中对应期号的实际开奖对比。
-    如果track最后一条的hit=-1（待验证），更新它。
-    """
     track = load_hit_track()
     if not track:
         print("[命中追踪] 暂无历史预测记录，跳过校验")
@@ -136,10 +145,8 @@ def verify_last_prediction(records):
 
     last = track[-1]
     if last.get("hit9", -1) != -1 and last.get("hit6", -1) != -1:
-        # 已经校验过了
         return track
 
-    # 找上期预测对应的实际开奖
     predicted_issue = last.get("issue", "")
     actual_sx = None
     for r in records:
@@ -150,7 +157,6 @@ def verify_last_prediction(records):
     if actual_sx is None:
         return track
 
-    # 更新命中结果
     last["hit9"] = 1 if actual_sx in last.get("nine", []) else 0
     last["hit6"] = 1 if actual_sx in last.get("six", []) else 0
     track[-1] = last
@@ -163,7 +169,6 @@ def verify_last_prediction(records):
 
 
 def append_prediction_to_track(issue, nine, six):
-    """新增一条预测记录（命中标记初始为-1待验证）"""
     track = load_hit_track()
     track.append({
         "issue": issue,
@@ -173,7 +178,6 @@ def append_prediction_to_track(issue, nine, six):
         "hit6": -1,
         "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
-    # 只保留最近100条
     if len(track) > 100:
         track = track[-100:]
     save_hit_track(track)
@@ -181,17 +185,16 @@ def append_prediction_to_track(issue, nine, six):
 
 
 def calc_dynamic_rate(window=50):
-    """计算动态命中率"""
     track = load_hit_track()
     valid = [t for t in track if t.get("hit9", -1) >= 0][-window:]
-    
+
     if not valid:
         return 0, 0, 0, 0
-    
+
     hits9 = sum(t["hit9"] for t in valid)
     hits6 = sum(t["hit6"] for t in valid)
     total = len(valid)
-    
+
     return hits9 / total * 100, hits6 / total * 100, hits9, hits6
 
 
@@ -208,7 +211,7 @@ def predict_latest():
     latest_zodiac = to_simplified(latest_full.get("zodiac", ""))
     latest_wave = latest_full.get("wave", "")
 
-    six, nine, kills, _ = predict_direct(records, len(records), top_n=6)
+    six, nine, kills = predict_direct(records, len(records))
 
     all_nums = []
     try:
@@ -266,16 +269,22 @@ def output_text(result):
         warn = "⚠️ 警告: 近期命中率低于基准线，请谨慎!"
 
     lines.append(f"动态命中率(近50期): 九肖 {alert9} {rate9:.1f}% | 六肖 {alert6} {rate6:.1f}%")
-    lines.append(f"基准命中率: 九肖 98.69% | 六肖 93.75%")
+    lines.append(f"基准命中率: 九肖 98.74% | 六肖 94.01% | 主3肖 75.33%")
     if warn:
         lines.append(warn)
     lines.append("-" * 30)
 
-    lines.append(f"规则库杀肖(展示): {', '.join(result.get('killed_zodiacs', []))}")
+    lines.append(f"规则库高风险(展示): {', '.join(result.get('killed_zodiacs', []))}")
     lines.append(f"★九肖预测: {', '.join(result.get('nine_pool', []))}")
     lines.append(f"★六肖预测: {', '.join(result.get('predicted_6xiao', []))}")
 
-    if len(result.get('predicted_6xiao', [])) < 6:
+    # 主3副3提示
+    six = result.get('predicted_6xiao', [])
+    if len(six) >= 6:
+        lines.append(f"★主3肖(重注): {', '.join(six[:3])}")
+        lines.append(f"  副3肖(轻注): {', '.join(six[3:6])}")
+
+    if len(six) < 6:
         lines.append(f"★重点生肖: 规则覆盖不足，六肖候选池未满")
     lines.append("=" * 50)
     return "\n".join(lines)
@@ -290,7 +299,6 @@ if __name__ == "__main__":
     parser.add_argument("--verify", action="store_true", help="仅校验上期命中（开奖后运行）")
     args = parser.parse_args()
 
-    # 仅校验模式
     if args.verify:
         data = load_all_data(auto_update=False)
         records = extract_records(data)
@@ -299,25 +307,21 @@ if __name__ == "__main__":
         print(f"动态命中率(近50期): 九肖 {rate9:.1f}% 六肖 {rate6:.1f}%")
         sys.exit(0)
 
-    # 预测模式
     result = predict_latest()
     text = output_text(result)
     print(text)
 
     if args.output:
-        # 校验上期预测
         data = load_all_data(auto_update=False)
         records = extract_records(data)
         verify_last_prediction(records)
 
-        # 保存本期预测到追踪
         append_prediction_to_track(
             result.get("next_qihao", ""),
             result.get("nine_pool", []),
             result.get("predicted_6xiao", [])
         )
 
-        # JS文件
         js_path = os.path.join(BASE_DIR, "prediction_max.js")
         js_data = {
             "time": result.get("latest_time", ""),
@@ -331,6 +335,8 @@ if __name__ == "__main__":
             "kills": result.get("killed_zodiacs", []),
             "ninePool": result.get("nine_pool", []),
             "sixPool": result.get("predicted_6xiao", []),
+            "main3": result.get("predicted_6xiao", [])[:3],
+            "sub3": result.get("predicted_6xiao", [])[3:6],
             "dynamicRate9": result.get("dynamic_rate9", 0),
             "dynamicRate6": result.get("dynamic_rate6", 0),
         }
@@ -340,7 +346,6 @@ if __name__ == "__main__":
             f.write(";")
         print(f"[OK] prediction_max.js")
 
-        # 文本记录
         record_dir = os.path.join(BASE_DIR, "max记录")
         os.makedirs(record_dir, exist_ok=True)
         record_path = os.path.join(record_dir, "prediction_max.txt")
