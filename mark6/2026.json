@@ -8582,7 +8582,29 @@
       "vs": null,
       "verify": false,
       "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
+    },
+    {
+      "suit": null,
+      "expect": "2026136",
+      "openTime": "2026-05-16 21:32:32",
+      "type": "8",
+      "openCode": "01,14,24,17,15,12,48",
+      "wave": "red,blue,red,green,blue,red,blue",
+      "zodiac": "马,蛇,羊,虎,龙,羊,羊",
+      "oddEven": null,
+      "allOddEven": null,
+      "bigSmall": null,
+      "allBigSmall": null,
+      "firstsecend": 0,
+      "left3": null,
+      "mid3": null,
+      "right3": null,
+      "pet": null,
+      "pk": null,
+      "vs": null,
+      "verify": false,
+      "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
     }
   ],
-  "timestamp": 1778861809321
+  "timestamp": 1778944597334
 }
