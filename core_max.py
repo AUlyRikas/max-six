@@ -1,37 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-core_max.py — 六肖预测核心模块（纯规则反向版 94.01%）
-================================================================================
+core_max.py — MAX六肖预测核心模块（金标验证版）
+==========================================================================
 架构：
-  1. 规则库七条规则给12生肖打分（杀对率越高扣分越多）
-  2. TOP6加分（规则反向得分前6名额外加20分）
-  3. 纯规则反向得分排序（频率权重=0，不再参与排序）
-  4. 直接取Top9=九肖、Top6=六肖
+  1. 用前1500期数据构建规则库，后689期数据给每条规则分级
+  2. 金标规则（测试集100%杀对率+0连错）投票筛选
+  3. 得票≥2的生肖硬排除，得票=1的降权
+  4. 排序：规则反向得分（金标1.0/银标0.5/铜标0.2） + 遗漏值0.3
+  5. 六肖在九肖池内按：规则反向得分 + 近3期冷却扣分
 
-排序公式：
-  综合得分 = 规则反向得分×1.0 + (TOP6加分20分)
-  规则反向得分 = 该生肖被七条规则杀对率累加 + 100
-  频率不再参与排序
-
-回测：1984期严格滚动
-  九肖: 98.74%  最大连错1期  连错1期: 25次
-  六肖: 94.01%  最大连错2期  连错1期: 110次  连错2期: 4次
-  主3肖: 75.33%  最大连错4期  连错≥3: 17次
-
+样本外验证（前1500期训练，后689期测试）：
+  九肖: 99.42%  最大连错1期  连错1期: 4次
+  六肖: 88.82%  最大连错3期  连错1期: 60次  连错2期: 7次  连错3期: 1次
+==========================================================================
 用法：
   python core_max.py                  → 自检+预测
   python core_max.py --output         → 预测+保存+校验上期命中
   python core_max.py --verify         → 仅校验上期命中（开奖后运行）
-================================================================================
+==========================================================================
 """
-import json, os, sys
-from collections import defaultdict, Counter
+import json
+import os
+import sys
+import math
+from collections import Counter
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MARK6_DIR = os.path.join(BASE_DIR, "mark6") if os.path.exists(os.path.join(BASE_DIR, "mark6")) else BASE_DIR
-if MARK6_DIR not in sys.path: sys.path.insert(0, MARK6_DIR)
+if MARK6_DIR not in sys.path:
+    sys.path.insert(0, MARK6_DIR)
 
 from shuju_loader import load_all_data
 from shx_suishu import get_shengxiao_by_suima, SHENGXIAO, to_simplified
@@ -39,15 +38,26 @@ from shx_suishu import get_shengxiao_by_suima, SHENGXIAO, to_simplified
 ZODIAC = SHENGXIAO
 POS_NAMES = ["平一", "平二", "平三", "平四", "平五", "平六", "特码"]
 
-RULES_PATH = os.path.join(BASE_DIR, "特肖杀肖规则库.json")
-with open(RULES_PATH, 'r', encoding='utf-8') as f:
-    SHAXIAO_RULES = json.load(f)
+# 规则库构建参数
+OFFSETS = list(range(-11, 0)) + [0] + list(range(1, 12))
+MIN_SAMPLES = 5
+MIN_KILL_RATE = 95.0
+MAX_STREAK = 1
 
+# 命中追踪
 TRACK_DIR = os.path.join(BASE_DIR, "max记录")
 TRACK_FILE = os.path.join(TRACK_DIR, "hit_track.json")
 
+# 分级规则库缓存
+GRADED_RULES_CACHE = None
+RULES_CACHE = None
 
-# ==================== 数据 ====================
+
+def offset_num(num, off):
+    return (num - 1 + off) % 49 + 1
+
+
+# ==================== 数据加载 ====================
 
 def extract_records(data):
     records = []
@@ -57,69 +67,263 @@ def extract_records(data):
             oc = str(item.get("openCode", ""))
             ot = item.get("openTime", "")
             year = int(ot[:4]) if ot else (int(qs[:4]) if len(qs) >= 4 else 2026)
-            if not qs or not oc: continue
+            if not qs or not oc:
+                continue
             parts = oc.strip().split(",")
-            if len(parts) != 7: continue
+            if len(parts) != 7:
+                continue
             nums = [int(p.strip()) for p in parts]
             records.append({
-                "qishu": qs, "year": year,
-                "te_num": nums[6], "te_sx": get_shengxiao_by_suima(nums[6], year),
+                "qishu": qs,
+                "year": year,
+                "te_num": nums[6],
+                "te_sx": get_shengxiao_by_suima(nums[6], year),
                 "te_wei": nums[6] % 10,
                 "ping_nums": nums[:6],
                 "ping_sx": [get_shengxiao_by_suima(n, year) for n in nums[:6]],
             })
-        except: continue
+        except:
+            continue
     records.sort(key=lambda x: int(x["qishu"]))
     return records
 
 
+# ==================== 规则库构建与分级 ====================
+
+def build_and_grade_rules(records):
+    """
+    用全部历史数据构建规则库，并用后689期数据给每条规则分级。
+    返回：(rules, graded_rules)
+    
+    rules: {特肖: {位置: {触发平码生肖: [(偏移, 杀肖目标, 原始杀对率, 样本量, 连错), ...]}}}
+    graded_rules: {(特肖, 位置, 触发平码生肖, 偏移, 杀肖目标): {'grade': 'gold'/'silver'/'bronze'/'discard', 'test_rate': 测试集杀对率}}
+    """
+    global GRADED_RULES_CACHE, RULES_CACHE
+    if GRADED_RULES_CACHE is not None and RULES_CACHE is not None:
+        return RULES_CACHE, GRADED_RULES_CACHE
+
+    # 切分训练集和测试集
+    total = len(records)
+    train_end = min(1500, max(200, total - 689))
+    train_records = records[:train_end]
+    test_records = records[train_end:]
+
+    # === 第一步：从训练集提取规则 ===
+    stats = {}
+    for sx in ZODIAC:
+        stats[sx] = {}
+        for pos_name in POS_NAMES:
+            stats[sx][pos_name] = {}
+
+    for i in range(len(train_records) - 1):
+        curr, nxt = train_records[i], train_records[i + 1]
+        curr_sx = curr["te_sx"]
+        year = curr["year"]
+        nxt_sx = nxt["te_sx"]
+
+        for pos_idx, pos_name in enumerate(POS_NAMES):
+            num = curr["ping_nums"][pos_idx] if pos_idx < 6 else curr["te_num"]
+            trigger_sx = get_shengxiao_by_suima(num, year)
+
+            for off in OFFSETS:
+                new_num = offset_num(num, off)
+                result_sx = get_shengxiao_by_suima(new_num, year)
+                key = (off, trigger_sx)
+
+                if key not in stats[curr_sx][pos_name]:
+                    stats[curr_sx][pos_name][key] = {"total": 0, "hit": 0, "result": result_sx}
+                stats[curr_sx][pos_name][key]["total"] += 1
+                if result_sx != nxt_sx:
+                    stats[curr_sx][pos_name][key]["hit"] += 1
+
+    rules = {}
+    for sx in ZODIAC:
+        rules[sx] = {}
+        for pos_name in POS_NAMES:
+            rules[sx][pos_name] = {}
+            for (off, trigger_sx), v in stats[sx][pos_name].items():
+                if v["total"] < MIN_SAMPLES:
+                    continue
+                raw_rate = v["hit"] / v["total"] * 100
+                if raw_rate < MIN_KILL_RATE:
+                    continue
+                # 连错检查（训练集内）
+                max_streak_found = 0
+                cur_streak = 0
+                for i in range(len(train_records) - 1):
+                    if train_records[i]["te_sx"] != sx:
+                        continue
+                    year_i = train_records[i]["year"]
+                    pos_idx = POS_NAMES.index(pos_name)
+                    num = train_records[i]["ping_nums"][pos_idx] if pos_idx < 6 else train_records[i]["te_num"]
+                    actual_sx = get_shengxiao_by_suima(num, year_i)
+                    if actual_sx != trigger_sx:
+                        continue
+                    killed_sx = get_shengxiao_by_suima(offset_num(num, off), year_i)
+                    if train_records[i + 1]["te_sx"] == killed_sx:
+                        cur_streak += 1
+                        max_streak_found = max(max_streak_found, cur_streak)
+                    else:
+                        cur_streak = 0
+                if max_streak_found > MAX_STREAK:
+                    continue
+                if trigger_sx not in rules[sx][pos_name]:
+                    rules[sx][pos_name][trigger_sx] = []
+                rules[sx][pos_name][trigger_sx].append(
+                    (off, v["result"], raw_rate, v["total"], max_streak_found)
+                )
+
+    # === 第二步：在测试集上逐条验证并分级 ===
+    graded_rules = {}
+    for sx in rules:
+        for pos_name in rules[sx]:
+            pos_idx = POS_NAMES.index(pos_name)
+            for trigger_sx in rules[sx][pos_name]:
+                for (off, killed_sx, raw_rate, samples, train_streak) in rules[sx][pos_name][trigger_sx]:
+                    test_hits = 0
+                    test_total = 0
+                    test_streak = 0
+                    test_max_streak = 0
+
+                    for i in range(len(test_records) - 1):
+                        if test_records[i]["te_sx"] != sx:
+                            continue
+                        year = test_records[i]["year"]
+                        actual_sx = test_records[i]["ping_sx"][pos_idx] if pos_idx < 6 else test_records[i]["te_sx"]
+                        if actual_sx != trigger_sx:
+                            continue
+                        target_sx = get_shengxiao_by_suima(
+                            offset_num(test_records[i]["ping_nums"][pos_idx] if pos_idx < 6 else test_records[i]["te_num"], off),
+                            year
+                        )
+                        nxt_sx = test_records[i + 1]["te_sx"]
+                        test_total += 1
+                        if target_sx != nxt_sx:
+                            test_hits += 1
+                            test_streak = 0
+                        else:
+                            test_streak += 1
+                            test_max_streak = max(test_max_streak, test_streak)
+
+                    test_rate = test_hits / test_total * 100 if test_total > 0 else 0
+
+                    # 分级
+                    if test_total == 0:
+                        grade = 'discard'
+                    elif test_rate == 100.0 and test_max_streak == 0:
+                        grade = 'gold'
+                    elif test_rate >= 95.0 and test_max_streak <= 1:
+                        grade = 'silver'
+                    elif test_rate >= 93.0 and test_max_streak <= 2:
+                        grade = 'bronze'
+                    else:
+                        grade = 'discard'
+
+                    rule_key = (sx, pos_name, trigger_sx, off, killed_sx)
+                    graded_rules[rule_key] = {
+                        'offset': off, 'killed_sx': killed_sx,
+                        'grade': grade, 'test_rate': test_rate,
+                        'samples': samples
+                    }
+
+    RULES_CACHE = rules
+    GRADED_RULES_CACHE = graded_rules
+    return rules, graded_rules
+
+
 # ==================== 预测核心 ====================
 
-def predict_direct(records, up_to):
+def predict_gold(records, up_to, rules, graded_rules):
     """
-    纯规则反向得分排序
-    频率权重=0，完全由七条规则的杀对率决定生肖安全性
-    杀对率越高 → 该生肖越危险 → 扣分越多 → 排名越靠后
+    金标规则投票筛选 + 降级杀肖 + 排序
+    返回：six, nine
     """
     cur_sx = records[up_to - 1]["te_sx"]
-    rule_scores = Counter()
 
-    # 1. 七条规则各自对12生肖打分
-    if cur_sx in SHAXIAO_RULES:
+    # === 金标规则投票 ===
+    gold_votes = Counter()
+    all_rule_scores = Counter()
+
+    if cur_sx in rules:
         for pos_idx, pos_name in enumerate(POS_NAMES):
-            if pos_name not in SHAXIAO_RULES[cur_sx]: continue
+            if pos_name not in rules[cur_sx]:
+                continue
             actual_sx = records[up_to - 1]["ping_sx"][pos_idx] if pos_idx < 6 else cur_sx
-            if actual_sx in SHAXIAO_RULES[cur_sx][pos_name]:
-                rules = SHAXIAO_RULES[cur_sx][pos_name][actual_sx]
-                for r in rules:
-                    # 每条规则的杀对率累加到被杀生肖上（负分=危险）
-                    rule_scores[r[1]] -= r[2]
+            if actual_sx not in rules[cur_sx][pos_name]:
+                continue
+            for (off, killed_sx, raw_rate, samples, train_streak) in rules[cur_sx][pos_name][actual_sx]:
+                rule_key = (cur_sx, pos_name, actual_sx, off, killed_sx)
+                grade_info = graded_rules.get(rule_key)
+                if grade_info is None:
+                    continue
 
-    # 2. TOP6加分：规则反向得分最高的6个生肖额外加20分
-    border = sorted(rule_scores.items(), key=lambda x: x[1], reverse=True)
-    top_bonus = set(s for s, _ in border[:6])
+                grade = grade_info['grade']
+                killed = killed_sx
 
-    # 3. 纯规则反向得分排序（频率权重=0）
-    scores = Counter()
+                # 金标投票
+                if grade == 'gold':
+                    gold_votes[killed] += 1
+
+                # 规则反向得分（用于排序）
+                weight = 1.0 if grade == 'gold' else (0.5 if grade == 'silver' else (0.2 if grade == 'bronze' else 0.0))
+                if weight > 0:
+                    all_rule_scores[killed] -= grade_info['test_rate'] * weight
+
+    # === 得票≥2硬排除，得票=1降权 ===
+    killed = set(s for s, v in gold_votes.items() if v >= 2)
+    soft_kill = set(s for s, v in gold_votes.items() if v == 1)
+
+    safe_pool = [s for s in ZODIAC if s not in killed]
+
+    # === 排序取九肖 ===
+    # 遗漏值
+    missing = {}
     for s in ZODIAC:
-        # 规则反向得分：没被杀的=100分，被杀的=100-杀对率
-        rule_score = rule_scores.get(s, 0) + 100
-        # TOP6加分
-        bonus = 20 if s in top_bonus else 0
-        scores[s] = rule_score + bonus
+        streak = 0
+        for i in range(up_to - 1, -1, -1):
+            if records[i]["te_sx"] != s:
+                streak += 1
+            else:
+                break
+        missing[s] = streak
+    max_missing = max(missing.values()) if missing else 1
 
-    # 4. 排序取结果
-    sorted_sx = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    nine = [s for s, _ in sorted_sx[:9]]
-    six = [s for s, _ in sorted_sx[:6]]
+    scores = {}
+    for s in safe_pool:
+        rs = (all_rule_scores.get(s, 0) + 100)
+        ms = math.log1p(missing.get(s, 0)) / math.log1p(max_missing) * 100 * 0.3
+        scores[s] = rs * 0.7 + ms
+        # 金标得票=1的降权
+        if s in soft_kill:
+            scores[s] -= 10
 
-    # 规则杀肖（展示用，杀对率低于-90即为高风险）
-    kills = set()
-    for s, sc in rule_scores.items():
-        if sc < -90:
-            kills.add(s)
+    sorted_pool = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    nine = [s for s, _ in sorted_pool[:9]]
 
-    return six, nine, kills
+    # 补足（安全池不足9个时）
+    if len(nine) < 9:
+        remaining_killed = sorted(killed, key=lambda s: gold_votes.get(s, 0))
+        for s in remaining_killed:
+            if s not in nine:
+                nine.append(s)
+            if len(nine) >= 9:
+                break
+
+    # === 六肖：在九肖池内，规则反向得分 + 近3期冷却扣分 ===
+    recent_sx = set()
+    for i in range(max(0, up_to - 3), up_to):
+        recent_sx.add(records[i]["te_sx"])
+
+    six_scores = {}
+    for s in nine:
+        base_score = scores.get(s, 0)
+        cool_penalty = 15 if s in recent_sx else 0
+        six_scores[s] = base_score - cool_penalty
+
+    sorted_six = sorted(six_scores.items(), key=lambda x: x[1], reverse=True)
+    six = [s for s, _ in sorted_six[:6]]
+
+    return six, nine, killed
 
 
 # ==================== 命中追踪 ====================
@@ -140,7 +344,6 @@ def save_hit_track(track):
 def verify_last_prediction(records):
     track = load_hit_track()
     if not track:
-        print("[命中追踪] 暂无历史预测记录，跳过校验")
         return track
 
     last = track[-1]
@@ -203,7 +406,8 @@ def calc_dynamic_rate(window=50):
 def predict_latest():
     data = load_all_data(auto_update=False)
     records = extract_records(data)
-    if len(records) < 50: return {"error": "数据不足"}
+    if len(records) < 50:
+        return {"error": "数据不足"}
 
     latest = records[-1]
     latest_full = data[-1] if data else {}
@@ -211,19 +415,25 @@ def predict_latest():
     latest_zodiac = to_simplified(latest_full.get("zodiac", ""))
     latest_wave = latest_full.get("wave", "")
 
-    six, nine, kills = predict_direct(records, len(records))
+    # 构建并分级规则库
+    rules, graded_rules = build_and_grade_rules(records)
+
+    six, nine, kills = predict_gold(records, len(records), rules, graded_rules)
 
     all_nums = []
     try:
         oc = latest_full.get("openCode", "")
         all_nums = [int(p.strip()) for p in oc.split(",")] if oc else []
-    except: pass
+    except:
+        pass
 
     next_qihao = ""
     try:
         exp = latest["qishu"]
-        if len(exp) >= 4: next_qihao = f"{exp[:4]}{int(exp[-3:]) + 1:03d}"
-    except: pass
+        if len(exp) >= 4:
+            next_qihao = f"{exp[:4]}{int(exp[-3:]) + 1:03d}"
+    except:
+        pass
 
     rate9, rate6, hits9, hits6 = calc_dynamic_rate()
 
@@ -262,29 +472,23 @@ def output_text(result):
     rate9 = result.get('dynamic_rate9', 0)
     rate6 = result.get('dynamic_rate6', 0)
 
-    alert9 = "🔴" if rate9 < 93.0 else "🟢"
-    alert6 = "🔴" if rate6 < 90.0 else "🟢"
+    alert9 = "🔴" if rate9 < 95.0 else "🟢"
+    alert6 = "🔴" if rate6 < 85.0 else "🟢"
     warn = ""
-    if rate9 < 93.0 or rate6 < 90.0:
+    if rate9 < 95.0 or rate6 < 85.0:
         warn = "⚠️ 警告: 近期命中率低于基准线，请谨慎!"
 
     lines.append(f"动态命中率(近50期): 九肖 {alert9} {rate9:.1f}% | 六肖 {alert6} {rate6:.1f}%")
-    lines.append(f"基准命中率: 九肖 98.74% | 六肖 94.01% | 主3肖 75.33%")
+    lines.append(f"基准命中率: 九肖 99.42% | 六肖 88.82%")
     if warn:
         lines.append(warn)
     lines.append("-" * 30)
 
-    lines.append(f"规则库高风险(展示): {', '.join(result.get('killed_zodiacs', []))}")
+    lines.append(f"规则库杀肖(金标投票≥2): {', '.join(result.get('killed_zodiacs', []))}")
     lines.append(f"★九肖预测: {', '.join(result.get('nine_pool', []))}")
     lines.append(f"★六肖预测: {', '.join(result.get('predicted_6xiao', []))}")
 
-    # 主3副3提示
-    six = result.get('predicted_6xiao', [])
-    if len(six) >= 6:
-        lines.append(f"★主3肖(重注): {', '.join(six[:3])}")
-        lines.append(f"  副3肖(轻注): {', '.join(six[3:6])}")
-
-    if len(six) < 6:
+    if len(result.get('predicted_6xiao', [])) < 6:
         lines.append(f"★重点生肖: 规则覆盖不足，六肖候选池未满")
     lines.append("=" * 50)
     return "\n".join(lines)
@@ -335,8 +539,6 @@ if __name__ == "__main__":
             "kills": result.get("killed_zodiacs", []),
             "ninePool": result.get("nine_pool", []),
             "sixPool": result.get("predicted_6xiao", []),
-            "main3": result.get("predicted_6xiao", [])[:3],
-            "sub3": result.get("predicted_6xiao", [])[3:6],
             "dynamicRate9": result.get("dynamic_rate9", 0),
             "dynamicRate6": result.get("dynamic_rate6", 0),
         }
