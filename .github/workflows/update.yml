@@ -15,9 +15,7 @@ jobs:
         run: pip install requests
       - name: 更新数据并预测
         run: |
-          rm -f prediction_max.js prediction_max.txt
           python mark6/shuju_loader.py
-          python core_update_rules.py
           python core_max.py --output
       - name: 提交更新
         run: |
