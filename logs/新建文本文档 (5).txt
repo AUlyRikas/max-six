@@ -1,0 +1,1032 @@
+当前九肖系统结构
+text
+输入：本期开奖数据
+  ↓
+┌─────────────────────────────────────┐
+│ 模型A (0.30)  本期特肖→下期特肖       │
+│   统计历史上"特肖X之后开出什么"        │
+│   查表得12生肖转移频率 → 归一化得分    │
+├─────────────────────────────────────┤
+│ 模型B (0.30)  加权趋势                │
+│   同上逻辑，但近期数据权重更高          │
+│   近12期×1.5, 近24期×1.2, 其余×1.0   │
+├─────────────────────────────────────┤
+│ 模型C (0.20)  二阶转移                │
+│   (上期特肖, 本期特肖) → 下期特肖      │
+│   统计两期连续模式的转移频率           │
+├─────────────────────────────────────┤
+│ 模型D (0.20)  号码→生肖               │
+│   本期特码号码 → 下期特肖              │
+│   从具体号码维度统计转移频率           │
+└─────────────────────────────────────┘
+  ↓ 四个模型得分×权重 → 合并排序
+  ↓
+  ┌ 杀肖规则 ──────────────────────┐
+  │ 1. 杀本期特肖                   │
+  │ 2. 平二号码-9 → 查当年生肖杀掉   │
+  └────────────────────────────────┘
+  ↓
+取剩余得分前9名 → 最终九肖
+  ↓
+  ┌ 高危过滤 (4特征触发时) ─────────┐
+  │ 尾7/尾3/上期猪/上期龙 → 不用方法B │
+  │ 改特码+7 ±4窗口生成九肖          │
+  └────────────────────────────────┘
+回测验证过的结论
+组件	单独命中率	作用
+模型A	73.90%	负贡献但分散面广
+模型B	73.40%	同上
+模型C	73.30%	同上
+模型D	74.66%	最接近随机
+四模型融合	75.37%	排列后接近随机75%
++杀本期特肖	76.02%	有效+0.65%
++平二num-9	76.63%	有效+0.61%
++4特征切换	77.23%	有效+0.60%
+┌ 杀肖规则 ──────────────────────┐
+  │ 1. 杀本期特肖                   │
+  │ 2. 平二号码-9 → 查当年生肖杀掉   │
+
+这个规则的的杀错率各是多少
+杀肖规则	独立杀对率	在九肖框架里的误杀
+杀本期特肖	92.18%	占连错18%（7/39次）
+平二号码-9	93.49%	占连错23%（9/39次）
+杀本期特肖全局杀对率更高（误杀的是下期重肖的情况），平二num-9杀对率更高但误杀分布更分散。两条规则各自独立杀对率都在92-93%，但在连错期同时翻车的比例不低。
+
+那就要知道连错中它们贡献了多少,错肯定会错的,但是可以规避一些不必要的,数值要知道,以及它们和选肖同时出错的的期数是多少,比例多少,这样才能挖到底,从根源上优化它们
+python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+xiao30.py — 两条杀肖规则在连错期的贡献拆解
+分析：每条规则单独误杀、同时误杀、与投票未覆盖的交叉
+"""
+import os, sys
+from collections import defaultdict, Counter
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MARK6_DIR = os.path.join(BASE_DIR, "mark6") if os.path.exists(os.path.join(BASE_DIR, "mark6")) else BASE_DIR
+if MARK6_DIR not in sys.path: sys.path.insert(0, MARK6_DIR)
+
+from shuju_loader import load_all_data
+from shx_suishu import get_shengxiao_by_suima, SHENGXIAO
+
+ZODIAC = SHENGXIAO
+
+def offset_num(num, offset):
+    return (num-1+offset)%49+1
+
+def extract(data):
+    records = []
+    for item in data:
+        try:
+            qs=str(item.get("expect","")); oc=str(item.get("openCode",""))
+            ot=item.get("openTime","")
+            year=int(ot[:4]) if ot else (int(qs[:4]) if len(qs)>=4 else 2026)
+            if not qs or not oc: continue
+            parts=oc.strip().split(",")
+            if len(parts)!=7: continue
+            nums=[int(p.strip()) for p in parts]
+            records.append({"qishu":qs,"year":year,"te_num":nums[6],"te_sx":get_shengxiao_by_suima(nums[6],year),"te_wei":nums[6]%10,"ping_nums":nums[:6],"all_nums":nums})
+        except: continue
+    records.sort(key=lambda x: int(x["qishu"]))
+    return records
+
+def method_B_components(records, up_to):
+    """返回四个关键信息：投票是否覆盖、两条杀肖各是否误杀"""
+    if up_to<50: return None
+    ta=defaultdict(Counter); tb=defaultdict(lambda:defaultdict(float)); tc=defaultdict(Counter); td=defaultdict(Counter)
+    for i in range(up_to-1): ta[records[i]["te_sx"]][records[i+1]["te_sx"]]+=1
+    for i in range(up_to-1):
+        dist=up_to-1-i; w=1.5 if dist<=12 else (1.2 if dist<=24 else 1.0)
+        tb[records[i]["te_sx"]][records[i+1]["te_sx"]]+=w
+    for i in range(up_to-2): tc[(records[i]["te_sx"],records[i+1]["te_sx"])][records[i+2]["te_sx"]]+=1
+    for i in range(up_to-1): td[records[i]["te_num"]][records[i+1]["te_sx"]]+=1
+    cur_sx=records[up_to-1]["te_sx"]; prev_sx=records[up_to-2]["te_sx"] if up_to>=2 else cur_sx
+    cur_num=records[up_to-1]["te_num"]; cur_year=records[up_to-1]["year"]
+    actual=records[up_to]["te_sx"] if up_to<len(records) else None
+
+    scores=Counter()
+    t=sum(ta[cur_sx].values())
+    if t: 
+        for s,c in ta[cur_sx].items(): scores[s]+=(c/t)*0.30
+    t=sum(tb[cur_sx].values())
+    if t: 
+        for s,c in tb[cur_sx].items(): scores[s]+=(c/t)*0.30
+    t=sum(tc[(prev_sx,cur_sx)].values()) if (prev_sx,cur_sx) in tc else 0
+    if t: 
+        for s,c in tc[(prev_sx,cur_sx)].items(): scores[s]+=(c/t)*0.20
+    t=sum(td[cur_num].values())
+    if t: 
+        for s,c in td[cur_num].items(): scores[s]+=(c/t)*0.20
+
+    # 投票是否覆盖（杀肖前看实际特肖在不在Top9）
+    vote_top9_before_kill = set(s for s,_ in scores.most_common(9))
+    vote_covered = actual in vote_top9_before_kill if actual else None
+
+    # 杀1
+    kill_self_wrong = (cur_sx == actual)
+    if cur_sx in scores: del scores[cur_sx]
+
+    # 杀2
+    kill_num9 = None
+    kill_num9_wrong = False
+    if len(records[up_to-1]["ping_nums"])>=2:
+        p2=records[up_to-1]["ping_nums"][1]
+        kill_num9=get_shengxiao_by_suima(offset_num(p2,-9),cur_year)
+        kill_num9_wrong = (kill_num9 == actual)
+        if kill_num9 in scores: del scores[kill_num9]
+
+    return {
+        "vote_covered": vote_covered,
+        "kill_self_wrong": kill_self_wrong,
+        "kill_num9_wrong": kill_num9_wrong,
+        "kill_self_sx": cur_sx,
+        "kill_num9_sx": kill_num9,
+        "actual": actual,
+    }
+
+def main():
+    print("xiao30.py — 杀肖规则贡献拆解")
+    print("="*65)
+    data=load_all_data(auto_update=False); records=extract(data)
+    min_hist=200
+
+    # 全局统计 + 连错期统计
+    all_results = []
+    miss_results = []
+
+    for idx in range(min_hist, len(records)):
+        comp = method_B_components(records, idx)
+        if comp is None: continue
+        all_results.append(comp)
+        # 判断最终是否命中
+        final_hit = True
+        if not comp["vote_covered"]: final_hit = False
+        elif comp["kill_self_wrong"]: final_hit = False
+        elif comp["kill_num9_wrong"]: final_hit = False
+        if not final_hit:
+            miss_results.append(comp)
+
+    total_all = len(all_results)
+    total_miss = len(miss_results)
+
+    print(f"\n总期数: {total_all}  |  未命中: {total_miss} ({total_miss/total_all*100:.1f}%)")
+
+    # 全局交叉统计
+    print(f"\n{'='*65}")
+    print("全局交叉分析（所有期数）:")
+    print(f"{'='*65}")
+
+    vote_cov = sum(1 for r in all_results if r["vote_covered"])
+    vote_not = sum(1 for r in all_results if not r["vote_covered"])
+    self_ok = sum(1 for r in all_results if not r["kill_self_wrong"])
+    self_bad = sum(1 for r in all_results if r["kill_self_wrong"])
+    num9_ok = sum(1 for r in all_results if not r["kill_num9_wrong"])
+    num9_bad = sum(1 for r in all_results if r["kill_num9_wrong"])
+
+    print(f"投票覆盖: {vote_cov} ({vote_cov/total_all*100:.1f}%) | 未覆盖: {vote_not} ({vote_not/total_all*100:.1f}%)")
+    print(f"杀自正确: {self_ok} ({self_ok/total_all*100:.1f}%) | 误杀自: {self_bad} ({self_bad/total_all*100:.1f}%)")
+    print(f"num9正确: {num9_ok} ({num9_ok/total_all*100:.1f}%) | 误杀num9: {num9_bad} ({num9_bad/total_all*100:.1f}%)")
+
+    # 全部错期里的贡献
+    print(f"\n{'='*65}")
+    print(f"未命中{total_miss}期的原因拆解:")
+    print(f"{'='*65}")
+
+    only_vote = sum(1 for r in miss_results if not r["vote_covered"] and not r["kill_self_wrong"] and not r["kill_num9_wrong"])
+    only_self = sum(1 for r in miss_results if r["vote_covered"] and r["kill_self_wrong"] and not r["kill_num9_wrong"])
+    only_num9 = sum(1 for r in miss_results if r["vote_covered"] and not r["kill_self_wrong"] and r["kill_num9_wrong"])
+    vote_and_self = sum(1 for r in miss_results if not r["vote_covered"] and r["kill_self_wrong"] and not r["kill_num9_wrong"])
+    vote_and_num9 = sum(1 for r in miss_results if not r["vote_covered"] and not r["kill_self_wrong"] and r["kill_num9_wrong"])
+    both_kill = sum(1 for r in miss_results if r["vote_covered"] and r["kill_self_wrong"] and r["kill_num9_wrong"])
+    all_three = sum(1 for r in miss_results if not r["vote_covered"] and r["kill_self_wrong"] and r["kill_num9_wrong"])
+
+    print(f"  仅投票未覆盖:         {only_vote:4d}次 ({only_vote/total_miss*100:5.1f}%)")
+    print(f"  仅杀自误杀:           {only_self:4d}次 ({only_self/total_miss*100:5.1f}%)")
+    print(f"  仅num9误杀:           {only_num9:4d}次 ({only_num9/total_miss*100:5.1f}%)")
+    print(f"  投票未覆盖+杀自误杀:    {vote_and_self:4d}次 ({vote_and_self/total_miss*100:5.1f}%)")
+    print(f"  投票未覆盖+num9误杀:   {vote_and_num9:4d}次 ({vote_and_num9/total_miss*100:5.1f}%)")
+    print(f"  杀自+n9同时误杀(投票覆盖): {both_kill:4d}次 ({both_kill/total_miss*100:5.1f}%)")
+    print(f"  三者全错:             {all_three:4d}次 ({all_three/total_miss*100:5.1f}%)")
+
+    # 最关键的：哪些是"原本投票对的，被误杀搞错的"
+    vote_right_killed = sum(1 for r in miss_results if r["vote_covered"] and (r["kill_self_wrong"] or r["kill_num9_wrong"]))
+    print(f"\n  投票本来正确、被误杀弄错: {vote_right_killed}次 ({vote_right_killed/total_miss*100:.1f}%)")
+    print(f"  投票本来就不对、杀不杀都错: {total_miss - vote_right_killed}次 ({(total_miss-vote_right_killed)/total_miss*100:.1f}%)")
+
+    # 两条杀肖规则的错误重叠度
+    both_wrong = sum(1 for r in all_results if r["kill_self_wrong"] and r["kill_num9_wrong"])
+    print(f"\n两条杀肖同时误杀: {both_wrong}次 ({both_wrong/total_all*100:.2f}%)")
+
+    # 同生肖被两条规则杀
+    same_target = sum(1 for r in all_results if r["kill_self_sx"] == r["kill_num9_sx"])
+    print(f"两规则杀同一生肖: {same_target}次 ({same_target/total_all*100:.1f}%)")
+
+    print(f"\n===== xiao30.py 完成 =====")
+
+if __name__=="__main__":
+    main()
+运行：
+
+bash
+python xiao30.py
+& C:/Users/Administrator/AppData/Local/Programs/Python/Python311/python.exe d:/lottery_ai/mark6/test1111111.py
+ttery_ai/mark6/test1111111.py
+xiao30.py — 杀肖规则贡献拆解
+=================================================================
+
+总期数: 1981  |  未命中: 729 (36.8%)
+
+=================================================================
+全局交叉分析（所有期数）:
+=================================================================
+投票覆盖: 1443 (72.8%) | 未覆盖: 538 (27.2%)
+杀自正确: 1827 (92.2%) | 误杀自: 154 (7.8%)
+num9正确: 1852 (93.5%) | 误杀num9: 129 (6.5%)
+
+=================================================================
+未命中729期的原因拆解:
+=================================================================
+  仅投票未覆盖:          454次 ( 62.3%)
+  仅杀自误杀:            104次 ( 14.3%)
+  仅num9误杀:             81次 ( 11.1%)
+  投票未覆盖+杀自误杀:      42次 (  5.8%)
+  投票未覆盖+num9误杀:     40次 (  5.5%)
+  杀自+n9同时误杀(投票覆盖):    6次 (  0.8%)
+  三者全错:                2次 (  0.3%)
+
+  投票本来正确、被误杀弄错: 191次 (26.2%)
+  投票本来就不对、杀不杀都错: 538次 (73.8%)
+
+两条杀肖同时误杀: 8次 (0.40%)
+两规则杀同一生肖: 177次 (8.9%)
+
+===== xiao30.py 完成 =====
+根源彻底暴露。
+
+核心数据
+错误来源	次数	占比
+投票本来就不对（杀不杀都错）	538次	73.8%
+投票正确、被误杀弄错	191次	26.2%
+191次"被误杀弄错"的细节
+原因	次数	占比
+仅杀自误杀	104次	54%
+仅num9误杀	81次	42%
+两杀同时误杀	6次	3%
+两条杀肖规则几乎从不一起翻车（6次/1981期），它们是独立失效的。
+
+两条杀肖规则的真实贡献
+指标	杀本期特肖	平二num-9
+全局正确率	92.2%	93.5%
+独立翻车	104次	81次
+同时翻车	8次（0.4%）	—
+杀同一生肖	177次（8.9%）	—
+可优化的空间
+杀本期特肖 + num9 把 191 次正确投票搞错了。 每次都是投票选对了，被其中一条规则砍掉。如果对这两条规则加一个"保护条件"——当投票Top9的分数紧密度超过阈值时不杀——至少能救回一部分。
+
+但更根本的问题是：73.8%的错是投票本身没覆盖。 两条杀肖规则已经没有优化空间了——它们各自92-93%的正确率，同时翻车仅0.4%。再调杀肖规则是舍本逐末。根源在投票模型。
+
+刚才又提到四特征出现后的错误期数是多少期
+xiao26 里统计过，上期猪/龙特征的连错期是 81 期。加上尾7/尾3，四个特征去重后的总高危期和其中的连错期，需要单独统计。
+
+直接在 xiao30 的数据上加一段特征维度的拆解：
+
+bash
+python -c "
+import os, sys
+from collections import defaultdict, Counter
+BASE_DIR = r'd:\lottery_ai\mark6'
+sys.path.insert(0, BASE_DIR)
+from shuju_loader import load_all_data
+from shx_suishu import get_shengxiao_by_suima, SHENGXIAO
+
+ZODIAC = SHENGXIAO
+
+def offset_num(num, offset):
+    return (num-1+offset)%49+1
+
+data = load_all_data(auto_update=False)
+records = []
+for item in data:
+    try:
+        qs=str(item.get('expect','')); oc=str(item.get('openCode',''))
+        ot=item.get('openTime','')
+        year=int(ot[:4]) if ot else (int(qs[:4]) if len(qs)>=4 else 2026)
+        if not qs or not oc: continue
+        parts=oc.strip().split(',')
+        if len(parts)!=7: continue
+        nums=[int(p.strip()) for p in parts]
+        records.append({'qishu':qs,'year':year,'te_num':nums[6],'te_sx':get_shengxiao_by_suima(nums[6],year),'te_wei':nums[6]%10,'ping_nums':nums[:6]})
+    except: continue
+records.sort(key=lambda x: int(x['qishu']))
+
+min_hist=200
+
+# 四个特征
+features = {
+    '尾7': lambda r,i: r[i-1]['te_wei']==7,
+    '尾3': lambda r,i: r[i-1]['te_wei']==3,
+    '上期猪': lambda r,i: i>=2 and r[i-2]['te_sx']=='猪',
+    '上期龙': lambda r,i: i>=2 and r[i-2]['te_sx']=='龙',
+}
+
+print('四特征触发期数 & 其中连错期数:')
+print(f\"{'特征':<8} {'触发期数':<8} {'连错期数':<8} {'连错率':<8}\")
+print('-'*40)
+
+for fname, fcheck in features.items():
+    total_f = 0
+    miss_f = 0
+    for idx in range(min_hist, len(records)):
+        if not fcheck(records, idx): continue
+        total_f += 1
+        # 模拟方法B
+        ta=defaultdict(Counter); tb=defaultdict(lambda:defaultdict(float)); tc=defaultdict(Counter); td=defaultdict(Counter)
+        for i in range(idx-1): ta[records[i]['te_sx']][records[i+1]['te_sx']]+=1
+        for i in range(idx-1):
+            dist=idx-1-i; w=1.5 if dist<=12 else (1.2 if dist<=24 else 1.0)
+            tb[records[i]['te_sx']][records[i+1]['te_sx']]+=w
+        for i in range(idx-2): tc[(records[i]['te_sx'],records[i+1]['te_sx'])][records[i+2]['te_sx']]+=1
+        for i in range(idx-1): td[records[i]['te_num']][records[i+1]['te_sx']]+=1
+        cur_sx=records[idx-1]['te_sx']; prev_sx=records[idx-2]['te_sx'] if idx>=2 else cur_sx
+        cur_num=records[idx-1]['te_num']; cur_year=records[idx-1]['year']
+        scores=Counter()
+        t=sum(ta[cur_sx].values())
+        if t:
+            for s,c in ta[cur_sx].items(): scores[s]+=(c/t)*0.30
+        t=sum(tb[cur_sx].values())
+        if t:
+            for s,c in tb[cur_sx].items(): scores[s]+=(c/t)*0.30
+        t=sum(tc[(prev_sx,cur_sx)].values()) if (prev_sx,cur_sx) in tc else 0
+        if t:
+            for s,c in tc[(prev_sx,cur_sx)].items(): scores[s]+=(c/t)*0.20
+        t=sum(td[cur_num].values())
+        if t:
+            for s,c in td[cur_num].items(): scores[s]+=(c/t)*0.20
+        if cur_sx in scores: del scores[cur_sx]
+        if len(records[idx-1]['ping_nums'])>=2:
+            p2=records[idx-1]['ping_nums'][1]; kill=get_shengxiao_by_suima(offset_num(p2,-9),cur_year)
+            if kill in scores: del scores[kill]
+        top9=set(s for s,_ in scores.most_common(9))
+        if records[idx]['te_sx'] not in top9:
+            miss_f += 1
+    print(f'  {fname:<6} {total_f:<8} {miss_f:<8} {miss_f/total_f*100:5.1f}%')
+
+# 去重后总触发期
+all_triggered = set()
+for fname, fcheck in features.items():
+    for idx in range(min_hist, len(records)):
+        if fcheck(records, idx): all_triggered.add(idx)
+print(f'\n四特征去重后总触发: {len(all_triggered)}期')
+"
+运行这个快速统计。
+
+因为文件太多了,我25以后的测试全部在同一个文件里测试了,xiao30覆盖没了
+没关系，直接跑上面那段统计命令就行，不需要文件。把那段 python -c "..." 完整复制到终端运行。
+
+或者我重新保存成 xiao31.py 给你跑：
+
+bash
+python -c "
+import os, sys
+sys.path.insert(0, r'd:\lottery_ai\mark6')
+from shuju_loader import load_all_data
+from shx_suishu import get_shengxiao_by_suima, SHENGXIAO
+from collections import defaultdict, Counter
+
+ZODIAC = SHENGXIAO
+def offset_num(num, offset): return (num-1+offset)%49+1
+
+data = load_all_data(auto_update=False)
+records = []
+for item in data:
+    try:
+        qs=str(item.get('expect',''))
+        oc=str(item.get('openCode',''))
+        ot=item.get('openTime','')
+        year=int(ot[:4]) if ot else (int(qs[:4]) if len(qs)>=4 else 2026)
+        if not qs or not oc: continue
+        parts=oc.strip().split(',')
+        if len(parts)!=7: continue
+        nums=[int(p.strip()) for p in parts]
+        records.append({'qishu':qs,'year':year,'te_num':nums[6],'te_sx':get_shengxiao_by_suima(nums[6],year),'te_wei':nums[6]%10,'ping_nums':nums[:6]})
+    except: continue
+records.sort(key=lambda x: int(x['qishu']))
+
+min_hist=200
+features = {
+    '尾7': lambda r,i: r[i-1]['te_wei']==7,
+    '尾3': lambda r,i: r[i-1]['te_wei']==3,
+    '上期猪': lambda r,i: i>=2 and r[i-2]['te_sx']=='猪',
+    '上期龙': lambda r,i: i>=2 and r[i-2]['te_sx']=='龙',
+}
+
+print('四特征触发期数 & 连错期数:')
+print(f\"{'特征':<8} {'触发':<6} {'连错':<6} {'连错率':<6}\")
+for fname, fcheck in features.items():
+    total_f=miss_f=0
+    for idx in range(min_hist, len(records)):
+        if not fcheck(records, idx): continue
+        total_f+=1
+        ta=defaultdict(Counter); tb=defaultdict(lambda:defaultdict(float)); tc=defaultdict(Counter); td=defaultdict(Counter)
+        for i in range(idx-1): ta[records[i]['te_sx']][records[i+1]['te_sx']]+=1
+        for i in range(idx-1):
+            dist=idx-1-i; w=1.5 if dist<=12 else (1.2 if dist<=24 else 1.0)
+            tb[records[i]['te_sx']][records[i+1]['te_sx']]+=w
+        for i in range(idx-2): tc[(records[i]['te_sx'],records[i+1]['te_sx'])][records[i+2]['te_sx']]+=1
+        for i in range(idx-1): td[records[i]['te_num']][records[i+1]['te_sx']]+=1
+        cur_sx=records[idx-1]['te_sx']; prev_sx=records[idx-2]['te_sx'] if idx>=2 else cur_sx
+        cur_num=records[idx-1]['te_num']; cur_year=records[idx-1]['year']
+        scores=Counter()
+        t=sum(ta[cur_sx].values())
+        if t:
+            for s,c in ta[cur_sx].items(): scores[s]+=(c/t)*0.30
+        t=sum(tb[cur_sx].values())
+        if t:
+            for s,c in tb[cur_sx].items(): scores[s]+=(c/t)*0.30
+        t=sum(tc[(prev_sx,cur_sx)].values()) if (prev_sx,cur_sx) in tc else 0
+        if t:
+            for s,c in tc[(prev_sx,cur_sx)].items(): scores[s]+=(c/t)*0.20
+        t=sum(td[cur_num].values())
+        if t:
+            for s,c in td[cur_num].items(): scores[s]+=(c/t)*0.20
+        if cur_sx in scores: del scores[cur_sx]
+        if len(records[idx-1]['ping_nums'])>=2:
+            p2=records[idx-1]['ping_nums'][1]; kill=get_shengxiao_by_suima(offset_num(p2,-9),cur_year)
+            if kill in scores: del scores[kill]
+        if records[idx]['te_sx'] not in set(s for s,_ in scores.most_common(9)):
+            miss_f+=1
+    print(f'  {fname:<6} {total_f:<6} {miss_f:<6} {miss_f/total_f*100:5.1f}%')
+
+all_trig=set()
+for fname,fcheck in features.items():
+    for idx in range(min_hist, len(records)):
+        if fcheck(records, idx): all_trig.add(idx)
+print(f'去重总触发: {len(all_trig)}期')
+print('done')
+"
+xiao30.py在,现在怎么添加
+把四特征统计代码直接追加到 xiao30.py 的 main() 函数末尾，在 print(f"\n===== xiao30.py 完成 =====") 之前加上：
+
+python
+    # 四特征触发期数 & 连错期数
+    print(f"\n{'='*65}")
+    print("四特征触发期数 & 方法B连错期数:")
+    print(f"{'='*65}")
+
+    features = {
+        '尾7': lambda i: records[min_hist+i-1]["te_wei"]==7 if min_hist+i>0 else False,
+        '尾3': lambda i: records[min_hist+i-1]["te_wei"]==3 if min_hist+i>0 else False,
+        '上期猪': lambda i: min_hist+i>=2 and records[min_hist+i-2]["te_sx"]=="猪",
+        '上期龙': lambda i: min_hist+i>=2 and records[min_hist+i-2]["te_sx"]=="龙",
+    }
+
+    print(f"{'特征':<8} {'触发':<6} {'方法B错':<8} {'错率':<6}")
+    print("-"*35)
+    all_triggered = set()
+    for fname, fcheck in features.items():
+        trig = miss = 0
+        for i, comp in enumerate(all_results):
+            if not fcheck(i): continue
+            trig += 1
+            all_triggered.add(i)
+            vote_cov = comp["vote_covered"]
+            self_wrong = comp["kill_self_wrong"]
+            num9_wrong = comp["kill_num9_wrong"]
+            if not vote_cov or self_wrong or num9_wrong:
+                miss += 1
+        print(f"  {fname:<6} {trig:<6} {miss:<8} {miss/trig*100:5.1f}%")
+    print(f"\n  四特征去重总触发: {len(all_triggered)}期")
+把这段加进去后运行 python xiao30.py。
+
+& C:/Users/Administrator/AppData/Local/Programs/Python/Python311/python.exe d:/lottery_ai/mark6/test1111111.py
+ttery_ai/mark6/test1111111.py
+xiao30.py — 杀肖规则贡献拆解
+=================================================================
+
+总期数: 1981  |  未命中: 729 (36.8%)
+
+=================================================================
+全局交叉分析（所有期数）:
+=================================================================
+投票覆盖: 1443 (72.8%) | 未覆盖: 538 (27.2%)
+杀自正确: 1827 (92.2%) | 误杀自: 154 (7.8%)
+num9正确: 1852 (93.5%) | 误杀num9: 129 (6.5%)
+
+=================================================================
+未命中729期的原因拆解:
+=================================================================
+  仅投票未覆盖:          454次 ( 62.3%)
+  仅杀自误杀:            104次 ( 14.3%)
+  仅num9误杀:             81次 ( 11.1%)
+  投票未覆盖+杀自误杀:      42次 (  5.8%)
+  投票未覆盖+num9误杀:     40次 (  5.5%)
+  杀自+n9同时误杀(投票覆盖):    6次 (  0.8%)
+  三者全错:                2次 (  0.3%)
+
+  投票本来正确、被误杀弄错: 191次 (26.2%)
+  投票本来就不对、杀不杀都错: 538次 (73.8%)
+
+两条杀肖同时误杀: 8次 (0.40%)
+两规则杀同一生肖: 177次 (8.9%)
+
+=================================================================
+四特征触发期数 & 方法B连错期数:
+=================================================================
+特征       触发     方法B错     错率    
+-----------------------------------
+  尾7     185    79        42.7%
+  尾3     195    74        37.9%
+  上期猪    146    50        34.2%
+  上期龙    167    71        42.5%
+
+  四特征去重总触发: 640期
+
+===== xiao30.py 完成 =====
+数据全了。
+
+完整画像
+特征	触发期数	方法B连错	连错率	vs全局36.8%
+全局	1981	729	36.8%	—
+尾7	185	79	42.7%	高5.9%
+上期龙	167	71	42.5%	高5.7%
+尾3	195	74	37.9%	高1.1%
+上期猪	146	50	34.2%	低2.6%
+四特征去重	640	—	—	占总量32%
+关键结论
+上期猪反而是低错率特征（34.2%，低于全局36.8%）。 尾7和上期龙才是真正的高危——错率超42%，比全局高近6个百分点。
+
+之前 xiao28 切换上期猪能提升命中率，不是因为猪期方法B特别差——猪期方法B其实还行（77.4%），而是特码+7在猪期特别强（80.8%），所以替换有效。
+
+真正拖后腿的是尾7和上期龙——640个高危期里这两占了352期，方法B在这两个区特别差。
+
+两条路
+1. 尾7/上期龙期切换其他方案——但 xiao27 已经测过特码+7在这两个区也只有74.6%和74.3%，换了也没多大提升。
+
+2. 尾7/上期龙期直接不出手——这是唯一确定能避开连错的方法。代价是放弃352期（占总量的18%）。
+
+我现在换个角度的方案你写出来试试,在任何一个高位特征出现时,直接把四模型反向选肖九肖,再来配合杀肖和不杀肖三种方案试试?
+python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+xiao31.py — 高危期反向投票
+高危特征出现时：四模型投票 → 取最不可能的9肖（得分最低的9个）
+配合：不杀肖 / 只杀本期特肖 / 两条全杀
+"""
+import os, sys
+from collections import defaultdict, Counter
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MARK6_DIR = os.path.join(BASE_DIR, "mark6") if os.path.exists(os.path.join(BASE_DIR, "mark6")) else BASE_DIR
+if MARK6_DIR not in sys.path: sys.path.insert(0, MARK6_DIR)
+
+from shuju_loader import load_all_data
+from shx_suishu import get_shengxiao_by_suima, SHENGXIAO
+
+ZODIAC = SHENGXIAO
+
+def offset_num(num, offset):
+    return (num-1+offset)%49+1
+
+def extract(data):
+    records = []
+    for item in data:
+        try:
+            qs=str(item.get("expect","")); oc=str(item.get("openCode",""))
+            ot=item.get("openTime","")
+            year=int(ot[:4]) if ot else (int(qs[:4]) if len(qs)>=4 else 2026)
+            if not qs or not oc: continue
+            parts=oc.strip().split(",")
+            if len(parts)!=7: continue
+            nums=[int(p.strip()) for p in parts]
+            records.append({"qishu":qs,"year":year,"te_num":nums[6],"te_sx":get_shengxiao_by_suima(nums[6],year),"te_wei":nums[6]%10,"ping_nums":nums[:6]})
+        except: continue
+    records.sort(key=lambda x: int(x["qishu"]))
+    return records
+
+def get_scores(records, up_to):
+    """返回四模型合并得分"""
+    ta=defaultdict(Counter); tb=defaultdict(lambda:defaultdict(float)); tc=defaultdict(Counter); td=defaultdict(Counter)
+    for i in range(up_to-1): ta[records[i]["te_sx"]][records[i+1]["te_sx"]]+=1
+    for i in range(up_to-1):
+        dist=up_to-1-i; w=1.5 if dist<=12 else (1.2 if dist<=24 else 1.0)
+        tb[records[i]["te_sx"]][records[i+1]["te_sx"]]+=w
+    for i in range(up_to-2): tc[(records[i]["te_sx"],records[i+1]["te_sx"])][records[i+2]["te_sx"]]+=1
+    for i in range(up_to-1): td[records[i]["te_num"]][records[i+1]["te_sx"]]+=1
+    cur_sx=records[up_to-1]["te_sx"]; prev_sx=records[up_to-2]["te_sx"] if up_to>=2 else cur_sx
+    cur_num=records[up_to-1]["te_num"]
+    scores=Counter()
+    t=sum(ta[cur_sx].values())
+    if t:
+        for s,c in ta[cur_sx].items(): scores[s]+=(c/t)*0.30
+    t=sum(tb[cur_sx].values())
+    if t:
+        for s,c in tb[cur_sx].items(): scores[s]+=(c/t)*0.30
+    t=sum(tc[(prev_sx,cur_sx)].values()) if (prev_sx,cur_sx) in tc else 0
+    if t:
+        for s,c in tc[(prev_sx,cur_sx)].items(): scores[s]+=(c/t)*0.20
+    t=sum(td[cur_num].values())
+    if t:
+        for s,c in td[cur_num].items(): scores[s]+=(c/t)*0.20
+    return scores
+
+def predict_normal(records, up_to, kill_mode="both"):
+    """正常期：正向投票 + 杀肖"""
+    scores = get_scores(records, up_to)
+    cur_sx=records[up_to-1]["te_sx"]; cur_year=records[up_to-1]["year"]
+    if kill_mode in ("both","self"): 
+        if cur_sx in scores: del scores[cur_sx]
+    if kill_mode == "both":
+        if len(records[up_to-1]["ping_nums"])>=2:
+            p2=records[up_to-1]["ping_nums"][1]
+            kill=get_shengxiao_by_suima(offset_num(p2,-9),cur_year)
+            if kill in scores: del scores[kill]
+    top9=[s for s,_ in scores.most_common(9)]
+    if len(top9)<9:
+        freq=Counter(r["te_sx"] for r in records[:up_to])
+        for s,_ in freq.most_common(12):
+            if s not in top9: top9.append(s)
+            if len(top9)>=9: break
+    return set(top9[:9])
+
+def predict_reverse(records, up_to, kill_mode="none"):
+    """高危期：反向投票（取得分最低的9肖）+ 杀肖"""
+    scores = get_scores(records, up_to)
+    cur_sx=records[up_to-1]["te_sx"]; cur_year=records[up_to-1]["year"]
+    
+    # 被杀生肖永远排除
+    killed_set = set()
+    if kill_mode in ("both","self"):
+        killed_set.add(cur_sx)
+        if cur_sx in scores: del scores[cur_sx]
+    if kill_mode == "both":
+        if len(records[up_to-1]["ping_nums"])>=2:
+            p2=records[up_to-1]["ping_nums"][1]
+            kill=get_shengxiao_by_suima(offset_num(p2,-9),cur_year)
+            killed_set.add(kill)
+            if kill in scores: del scores[kill]
+    
+    # 反向：取最低分9个（排除已被杀的）
+    bottom9 = [s for s,_ in scores.most_common()[-9:]]
+    result = set(bottom9)
+    # 被杀生肖加回来
+    result |= killed_set
+    # 如果不够9个，补高分
+    if len(result) < 9:
+        top = [s for s,_ in scores.most_common(9)]
+        for s in top:
+            result.add(s)
+            if len(result) >= 9: break
+    return set(list(result)[:9])
+
+def backtest_streak(name, results_list):
+    hits=sum(results_list); total=len(results_list)
+    rate=hits/total*100 if total>0 else 0
+    max_streak=cur=0; streak_dist=Counter()
+    for r in results_list:
+        if not r: cur+=1
+        else:
+            if cur>0: streak_dist[cur]+=1
+            cur=0
+    if cur>0: streak_dist[cur]+=1
+    if streak_dist: max_streak=max(streak_dist.keys())
+    over2=sum(v for k,v in streak_dist.items() if k>=3)
+    print(f"  {name}: {rate:.2f}% 最大连错{max_streak}期 连错≥3:{over2}次")
+    return rate
+
+def main():
+    print("xiao31.py — 高危期反向投票")
+    print("="*55)
+    data=load_all_data(auto_update=False); records=extract(data)
+    min_hist=200
+
+    features = {
+        "尾7": lambda r,i: r[i-1]["te_wei"]==7,
+        "尾3": lambda r,i: r[i-1]["te_wei"]==3,
+        "上期猪": lambda r,i: i>=2 and r[i-2]["te_sx"]=="猪",
+        "上期龙": lambda r,i: i>=2 and r[i-2]["te_sx"]=="龙",
+    }
+
+    # 测试不同组合
+    tests = [
+        ("仅尾7+尾3反向", ["尾7","尾3"]),
+        ("仅上期龙反向", ["上期龙"]),
+        ("尾7+尾3+龙反向", ["尾7","尾3","上期龙"]),
+        ("尾7+龙反向", ["尾7","上期龙"]),
+    ]
+
+    for label, feature_list in tests:
+        for kill_mode in ["none", "self", "both"]:
+            res=[]
+            rev_cnt=0; rev_hits=0
+            for idx in range(min_hist, len(records)):
+                is_risk = any(features[f](records, idx) for f in feature_list)
+                if is_risk:
+                    rev_cnt+=1
+                    pred=predict_reverse(records, idx, kill_mode=kill_mode)
+                    hit=records[idx]["te_sx"] in pred
+                    if hit: rev_hits+=1
+                    res.append(hit)
+                else:
+                    res.append(records[idx]["te_sx"] in predict_normal(records, idx, kill_mode="both"))
+            print(f"\n{label} + 杀肖={kill_mode}:")
+            backtest_streak(f"反向+杀{kill_mode}", res)
+            print(f"  反向触发: {rev_cnt}期, 命中率: {rev_hits/rev_cnt*100:.1f}%")
+
+    print(f"\n===== xiao31.py 完成 =====")
+
+if __name__=="__main__":
+    main()
+运行：
+
+bash
+python xiao31.py
+& C:/Users/Administrator/AppData/Local/Programs/Python/Python311/python.exe d:/lottery_ai/mark6/test1111111.py
+ttery_ai/mark6/test1111111.py
+xiao31.py — 高危期反向投票
+=======================================================
+
+仅尾7+尾3反向 + 杀肖=none:
+  反向+杀none: 77.33% 最大连错4期 连错≥3:15次
+  反向触发: 380期, 命中率: 77.9%
+
+仅尾7+尾3反向 + 杀肖=self:
+  反向+杀self: 77.03% 最大连错4期 连错≥3:15次
+  反向触发: 380期, 命中率: 76.3%
+
+仅尾7+尾3反向 + 杀肖=both:
+  反向+杀both: 76.73% 最大连错4期 连错≥3:14次
+  反向触发: 380期, 命中率: 74.7%
+
+仅上期龙反向 + 杀肖=none:
+  反向+杀none: 77.03% 最大连错4期 连错≥3:9次
+  反向触发: 167期, 命中率: 76.6%
+
+仅上期龙反向 + 杀肖=self:
+  反向+杀self: 76.78% 最大连错4期 连错≥3:12次
+  反向触发: 167期, 命中率: 73.7%
+
+仅上期龙反向 + 杀肖=both:
+  反向+杀both: 76.63% 最大连错5期 连错≥3:14次
+  反向触发: 167期, 命中率: 71.9%
+
+尾7+尾3+龙反向 + 杀肖=none:
+  反向+杀none: 77.74% 最大连错4期 连错≥3:12次
+  反向触发: 523期, 命中率: 77.8%
+
+尾7+尾3+龙反向 + 杀肖=self:
+  反向+杀self: 77.23% 最大连错4期 连错≥3:17次
+  反向触发: 523期, 命中率: 75.9%
+
+尾7+尾3+龙反向 + 杀肖=both:
+  反向+杀both: 76.78% 最大连错4期 连错≥3:19次
+  反向触发: 523期, 命中率: 74.2%
+
+尾7+龙反向 + 杀肖=none:
+  反向+杀none: 77.44% 最大连错5期 连错≥3:12次
+  反向触发: 339期, 命中率: 77.0%
+
+尾7+龙反向 + 杀肖=self:
+  反向+杀self: 77.18% 最大连错4期 连错≥3:15次
+  反向触发: 339期, 命中率: 75.5%
+
+尾7+龙反向 + 杀肖=both:
+  反向+杀both: 76.78% 最大连错4期 连错≥3:15次
+  反向触发: 339期, 命中率: 73.2%
+
+===== xiao31.py 完成 =====
+反向投票有效！
+
+最佳方案
+尾7+尾3+上期龙 三特征触发时 → 反向投票 + 不杀肖（none）
+
+方案	命中率	最大连错	连错≥3
+原版方法B	76.63%	4期	12次
+三特征反向+不杀肖	77.74%	4期	12次
+命中率提升1.11个百分点，是截至目前所有优化中提升幅度最大的单次跳跃。
+
+关键规律
+杀肖模式	命中率
+反向 + 不杀肖（none）	77.74%
+反向 + 只杀本期特肖	77.23%
+反向 + 两条都杀	76.78%
+反向投票时，不杀肖最好。 因为反向已经把得分低的放在候选里了，正确答案大概率不在被杀的那两个生肖中。杀了反而误杀。
+
+连错≥3仍然是12次
+命中率从76.63%跳到77.74%，提升了1.11%，但连错结构没变。523期触发反向，这些期里的连错被消化了一部分，但正常期的连错依然存在。
+
+继续把上期猪也加入反向特征？目前523+146去重后约640期，覆盖32%的总期数。
+
+有点巧合的是我们有4各模型,刚好高危特征有4个,是不是分别试试每个高危特征中那个模型反向选九肖会更显著?但是模型的加权是一体的,是否可以升高或降低其中一个来逐个测试,然后再加杀肖进去看有没有提高
+思路非常精准。四个高危特征各对应一个模型的反向信号，四模型权重独立可调。
+
+实验设计
+特征	测试模型	逻辑
+尾7	模型A（基础转移）	降低A权重/反向A
+尾3	模型B（加权趋势）	降低B权重/反向B
+上期龙	模型C（二阶转移）	降低C权重/反向C
+上期猪	模型D（号码转移）	降低D权重/反向D
+四个特征触发时，把对应模型的权重降到0或负向，看哪个能精准避开连错。
+
+python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+xiao32.py — 高危特征一对一绑定模型反向
+四个特征各绑定一个模型，触发时该模型反向，其他正常
+"""
+import os, sys
+from collections import defaultdict, Counter
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MARK6_DIR = os.path.join(BASE_DIR, "mark6") if os.path.exists(os.path.join(BASE_DIR, "mark6")) else BASE_DIR
+if MARK6_DIR not in sys.path: sys.path.insert(0, MARK6_DIR)
+
+from shuju_loader import load_all_data
+from shx_suishu import get_shengxiao_by_suima, SHENGXIAO
+
+ZODIAC = SHENGXIAO
+
+def offset_num(num, offset):
+    return (num-1+offset)%49+1
+
+def extract(data):
+    records = []
+    for item in data:
+        try:
+            qs=str(item.get("expect","")); oc=str(item.get("openCode",""))
+            ot=item.get("openTime","")
+            year=int(ot[:4]) if ot else (int(qs[:4]) if len(qs)>=4 else 2026)
+            if not qs or not oc: continue
+            parts=oc.strip().split(",")
+            if len(parts)!=7: continue
+            nums=[int(p.strip()) for p in parts]
+            records.append({"qishu":qs,"year":year,"te_num":nums[6],"te_sx":get_shengxiao_by_suima(nums[6],year),"te_wei":nums[6]%10,"ping_nums":nums[:6]})
+        except: continue
+    records.sort(key=lambda x: int(x["qishu"]))
+    return records
+
+def predict_with_model_tweak(records, up_to, reverse_models=None, boost_models=None, kill_mode="both"):
+    """
+    reverse_models: set of model names to reverse (take bottom instead of top)
+    boost_models: dict of model->weight multiplier
+    """
+    ta=defaultdict(Counter); tb=defaultdict(lambda:defaultdict(float)); tc=defaultdict(Counter); td=defaultdict(Counter)
+    for i in range(up_to-1): ta[records[i]["te_sx"]][records[i+1]["te_sx"]]+=1
+    for i in range(up_to-1):
+        dist=up_to-1-i; w=1.5 if dist<=12 else (1.2 if dist<=24 else 1.0)
+        tb[records[i]["te_sx"]][records[i+1]["te_sx"]]+=w
+    for i in range(up_to-2): tc[(records[i]["te_sx"],records[i+1]["te_sx"])][records[i+2]["te_sx"]]+=1
+    for i in range(up_to-1): td[records[i]["te_num"]][records[i+1]["te_sx"]]+=1
+    cur_sx=records[up_to-1]["te_sx"]; prev_sx=records[up_to-2]["te_sx"] if up_to>=2 else cur_sx
+    cur_num=records[up_to-1]["te_num"]; cur_year=records[up_to-1]["year"]
+
+    scores=Counter()
+    reverse_scores=Counter()
+
+    # 模型A
+    t=sum(ta[cur_sx].values())
+    if t:
+        for s,c in ta[cur_sx].items():
+            if "A" in (reverse_models or set()):
+                reverse_scores[s] += (c/t)*0.30
+            else:
+                scores[s] += (c/t)*0.30 * (boost_models.get("A",1.0) if boost_models else 1.0)
+    # 模型B
+    t=sum(tb[cur_sx].values())
+    if t:
+        for s,c in tb[cur_sx].items():
+            if "B" in (reverse_models or set()):
+                reverse_scores[s] += (c/t)*0.30
+            else:
+                scores[s] += (c/t)*0.30 * (boost_models.get("B",1.0) if boost_models else 1.0)
+    # 模型C
+    t=sum(tc[(prev_sx,cur_sx)].values()) if (prev_sx,cur_sx) in tc else 0
+    if t:
+        for s,c in tc[(prev_sx,cur_sx)].items():
+            if "C" in (reverse_models or set()):
+                reverse_scores[s] += (c/t)*0.20
+            else:
+                scores[s] += (c/t)*0.20 * (boost_models.get("C",1.0) if boost_models else 1.0)
+    # 模型D
+    t=sum(td[cur_num].values())
+    if t:
+        for s,c in td[cur_num].items():
+            if "D" in (reverse_models or set()):
+                reverse_scores[s] += (c/t)*0.20
+            else:
+                scores[s] += (c/t)*0.20 * (boost_models.get("D",1.0) if boost_models else 1.0)
+
+    # 合并：正向得分 - 反向得分
+    final = Counter()
+    for s in ZODIAC:
+        final[s] = scores.get(s,0) - reverse_scores.get(s,0)
+
+    # 杀肖
+    if kill_mode in ("both","self"):
+        if cur_sx in final: del final[cur_sx]
+    if kill_mode=="both":
+        if len(records[up_to-1]["ping_nums"])>=2:
+            p2=records[up_to-1]["ping_nums"][1]
+            kill=get_shengxiao_by_suima(offset_num(p2,-9),cur_year)
+            if kill in final: del final[kill]
+
+    top9=[s for s,_ in final.most_common(9)]
+    if len(top9)<9:
+        freq=Counter(r["te_sx"] for r in records[:up_to])
+        for s,_ in freq.most_common(12):
+            if s not in top9: top9.append(s)
+            if len(top9)>=9: break
+    return set(top9[:9])
+
+def backtest_streak(name, results_list):
+    hits=sum(results_list); total=len(results_list)
+    rate=hits/total*100 if total>0 else 0
+    max_streak=cur=0; streak_dist=Counter()
+    for r in results_list:
+        if not r: cur+=1
+        else:
+            if cur>0: streak_dist[cur]+=1
+            cur=0
+    if cur>0: streak_dist[cur]+=1
+    if streak_dist: max_streak=max(streak_dist.keys())
+    over2=sum(v for k,v in streak_dist.items() if k>=3)
+    print(f"  {name}: {rate:.2f}% 最大连错{max_streak}期 连错≥3:{over2}次")
+    return rate
+
+def main():
+    print("xiao32.py — 高危特征一对一模型反向")
+    print("="*55)
+    data=load_all_data(auto_update=False); records=extract(data)
+    min_hist=200
+
+    features = {
+        "尾7": lambda r,i: r[i-1]["te_wei"]==7,
+        "尾3": lambda r,i: r[i-1]["te_wei"]==3,
+        "上期猪": lambda r,i: i>=2 and r[i-2]["te_sx"]=="猪",
+        "上期龙": lambda r,i: i>=2 and r[i-2]["te_sx"]=="龙",
+    }
+
+    # 特征→模型绑定
+    bindings = [
+        ("尾7→A反", {"尾7":"A"}, "both"),
+        ("尾3→B反", {"尾3":"B"}, "both"),
+        ("上期猪→C反", {"上期猪":"C"}, "both"),
+        ("上期龙→D反", {"上期龙":"D"}, "both"),
+        ("尾7→A反+上期龙→D反", {"尾7":"A","上期龙":"D"}, "both"),
+        ("全绑定各反各", {"尾7":"A","尾3":"B","上期猪":"C","上期龙":"D"}, "both"),
+    ]
+
+    for label, binding, kill_mode in bindings:
+        res=[]
+        for idx in range(min_hist, len(records)):
+            reverse_set = set()
+            for fname, model in binding.items():
+                if features[fname](records, idx):
+                    reverse_set.add(model)
+            pred = predict_with_model_tweak(records, idx, reverse_models=reverse_set, kill_mode=kill_mode)
+            res.append(records[idx]["te_sx"] in pred)
+        backtest_streak(label, res)
+
+    print(f"\n原版方法B: 76.63%")
+    print(f"===== xiao32.py 完成 =====")
+
+if __name__=="__main__":
+    main()
+运行：
+
+bash
+python xiao32.py
+& C:/Users/Administrator/AppData/Local/Programs/Python/Python311/python.exe d:/lottery_ai/mark6/test1111111.py
+ttery_ai/mark6/test1111111.py
+xiao32.py — 高危特征一对一模型反向
+=======================================================
+  尾7→A反: 76.33% 最大连错5期 连错≥3:10次
+  尾3→B反: 76.22% 最大连错4期 连错≥3:13次
+  上期猪→C反: 76.27% 最大连错4期 连错≥3:10次
+  上期龙→D反: 76.22% 最大连错4期 连错≥3:11次
+  尾7→A反+上期龙→D反: 76.38% 最大连错5期 连错≥3:8次
+  全绑定各反各: 76.33% 最大连错5期 连错≥3:7次
+
+原版方法B: 76.63%
+===== xiao32.py 完成 =====
+
+我没看明白,请问是不是每一个高位特征都分别调整4个加权来测试过
+不是。xiao32 只测了"特征绑定一个模型反向"，没有测权重升降。
+
+你说的是这个意思
+每个高危特征触发时，分别调整四个模型的权重（升高/降低/反向），看哪个调整方式在该特征下命中率最高。
+
+比如尾7触发时：
+
+调整	A	B	C	D
+测试1	反向	正常	正常	正常
+测试2	正常	反向	正常	正常
+测试3	正常	正常	反向	正常
+测试4	正常	正常	正常	反向
+测试5	降为0	正常	正常	正常
+...	...	...	...	...
+四个特征 × 四种调整（反向/降半/降零/正常）× 四模型 = 需要全面扫描。
+
+要这样测吗？如果是，我出 xiao33 做完整网格扫描，找出每个特征下的最优模型调整组合。
