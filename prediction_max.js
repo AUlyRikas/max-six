@@ -8,17 +8,17 @@ var predictionMaxData = {
   "teWei": 3,
   "nextIssue": "2026143",
   "kills": [
-    "羊",
-    "兔",
-    "牛",
-    "狗",
+    "龙",
     "虎",
+    "羊",
     "鸡",
-    "鼠",
-    "蛇",
-    "猪",
+    "狗",
     "马",
-    "龙"
+    "牛",
+    "兔",
+    "猪",
+    "蛇",
+    "鼠"
   ],
   "ninePool": [
     "猪",
@@ -39,6 +39,6 @@ var predictionMaxData = {
     "猪",
     "牛"
   ],
-  "dynamicRate9": 87.5,
-  "dynamicRate6": 62.5
+  "dynamicRate9": 88.88888888888889,
+  "dynamicRate6": 55.55555555555556
 };
