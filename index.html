@@ -53,7 +53,6 @@
         footer{text-align:center;padding:18px;color:#999;font-size:11px;border-top:1px solid #e0e0e0;margin-top:24px}
         .back-to-top{position:fixed;right:20px;bottom:30px;width:44px;height:44px;border:2px solid #1a3d96;border-radius:50%;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,0.15);transition:all 0.3s;opacity:0;visibility:hidden}.back-to-top.show{opacity:1;visibility:visible}.arrow-up{display:inline-block;width:12px;height:12px;border-left:2px solid #1a3d96;border-top:2px solid #1a3d96;transform:rotate(45deg);margin-top:4px}
         @media screen and (max-width:480px){.open_code_zone{flex-direction:column}.open_code_zone_right{flex-direction:row;justify-content:space-around;width:100%}.open_code_zone_left-item-number{width:38px;height:38px;font-size:18px}.history-ball{width:26px;height:26px;font-size:11px}.history-zodiac-tag{font-size:8px}.history-plus{font-size:14px}.lotteryMain{font-size:28px}.predict-title{font-size:20px}.predict-subtitle{font-size:15px}.predict-tag.green-tag{font-size:22px}}
-        .predict-detail{font-size:18px;margin:0;padding:2px 0}
     </style>
 </head>
 <body>
@@ -65,7 +64,7 @@
 </div>
 <div id="app" class="page-width" style="display:none;">
     <div class="logo-box">
-        <div style="font-size:32px;font-weight:bold;color:#1a3d96;letter-spacing:4px;">MAX九肖88%&六肖69%</div>
+        <div style="font-size:32px;font-weight:bold;color:#1a3d96;letter-spacing:4px;">MAX虚假版98%&95%</div>
     </div>
 
     <div class="daohang">
@@ -173,26 +172,18 @@ function loadLive(){
     }
     document.getElementById('liveBallContainer').innerHTML=html;
 
-    var six=p.sixPool||[], nine=p.ninePool||[], kill=p.fixedKillSet||[];
-    var three=(p.pools&&p.pools["3"])?p.pools["3"]:[];
-    var four=(p.pools&&p.pools["4"])?p.pools["4"]:[];
-    var five=(p.pools&&p.pools["5"])?p.pools["5"]:[];
-
     document.getElementById('predictResultArea').innerHTML=
         '<div class="predict-card">'+
         '<div class="predict-title">下期预测 · '+p.nextIssue+'</div>'+
         '<div class="predict-subtitle">基于 '+p.issue+' | 开奖 '+p.code+' | 特肖 '+p.teSx+'(尾'+p.teWei+')</div>'+
-        (kill.length?'<div class="predict-tags" style="justify-content:center;"><span class="predict-tag red-tag">杀肖: '+kill.join('、')+'</span></div>':'')+
-        '<div class="predict-tags" style="justify-content:center;margin:6px 0;">'+six.map(function(s){return '<span class="predict-tag green-tag">'+s+'</span>';}).join(' ')+'</div>'+
-        '<div class="predict-tags predict-detail" style="justify-content:center;color:#1a3d96;">九肖: '+nine.join('、')+'</div>'+
-        '<div class="predict-tags predict-detail" style="justify-content:center;color:#007acc;">八肖: '+nine.slice(0,8).join('、')+'</div>'+
-        '<div class="predict-tags predict-detail" style="justify-content:center;color:#00897b;">七肖: '+nine.slice(0,7).join('、')+'</div>'+
-        '<div class="predict-tags predict-detail" style="justify-content:center;color:#e65100;">六肖: '+six.join('、')+'</div>'+
-        (five.length?'<div class="predict-tags predict-detail" style="justify-content:center;color:#6a1b9a;">五肖: '+five.join('、')+'</div>':'')+
-        (four.length?'<div class="predict-tags predict-detail" style="justify-content:center;color:#c62828;">四肖: '+four.join('、')+'</div>':'')+
-        (three.length?'<div class="predict-tags predict-detail" style="justify-content:center;color:#2e7d32;">三肖: '+three.join('、')+'</div>':'')+
+        '<div class="predict-tags" style="justify-content:center;margin:10px 0;">'+p.sixPool.map(function(s){return '<span class="predict-tag green-tag">'+s+'</span>';}).join(' ')+'</div>'+
+        '<div class="predict-tags" style="justify-content:center;">'+
+        (p.fixedKillSet&&p.fixedKillSet.length?'<span class="predict-tag red-tag">杀肖: '+p.fixedKillSet.join('、')+'</span>':'')+
+        ' '+
+        (p.ninePool&&p.ninePool.length?'<span class="predict-tag">九肖池: '+p.ninePool.join('、')+'</span>':'')+
         '</div></div>';
 }
+
 
 var fullHistoryList=[],currentPage=1,totalPages=0;
 var PAGE_SIZE=10;
