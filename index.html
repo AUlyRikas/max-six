@@ -174,9 +174,9 @@ function loadLive(){
     document.getElementById('liveBallContainer').innerHTML=html;
 
     var six=p.sixPool||[], nine=p.ninePool||[], kill=p.fixedKillSet||[];
-    var three=(p.pools&&p.pools[3])?p.pools[3]:[];
-    var four=(p.pools&&p.pools[4])?p.pools[4]:[];
-    var five=(p.pools&&p.pools[5])?p.pools[5]:[];
+    var three=(p.pools&&p.pools["3"])?p.pools["3"]:[];
+    var four=(p.pools&&p.pools["4"])?p.pools["4"]:[];
+    var five=(p.pools&&p.pools["5"])?p.pools["5"]:[];
 
     document.getElementById('predictResultArea').innerHTML=
         '<div class="predict-card">'+
