@@ -17,6 +17,7 @@ jobs:
         run: |
           python mark6/shuju_loader.py
           python core_max.py --output
+          python ensemble_4in1.py --output
       - name: 提交更新
         run: |
           git config user.name "GitHub Actions"
