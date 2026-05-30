@@ -8890,7 +8890,29 @@
       "vs": null,
       "verify": false,
       "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
+    },
+    {
+      "suit": null,
+      "expect": "2026150",
+      "openTime": "2026-05-30 21:32:32",
+      "type": "8",
+      "openCode": "11,04,22,25,44,19,09",
+      "wave": "green,blue,green,blue,green,red,blue",
+      "zodiac": "猴,兔,鸡,马,猪,鼠,狗",
+      "oddEven": null,
+      "allOddEven": null,
+      "bigSmall": null,
+      "allBigSmall": null,
+      "firstsecend": 0,
+      "left3": null,
+      "mid3": null,
+      "right3": null,
+      "pet": null,
+      "pk": null,
+      "vs": null,
+      "verify": false,
+      "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
     }
   ],
-  "timestamp": 1780076692274
+  "timestamp": 1780155386673
 }
