@@ -8978,7 +8978,29 @@
       "vs": null,
       "verify": false,
       "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
+    },
+    {
+      "suit": null,
+      "expect": "2026154",
+      "openTime": "2026-06-03 21:32:32",
+      "type": "8",
+      "openCode": "46,28,42,31,23,34,41",
+      "wave": "red,green,blue,blue,red,red,blue",
+      "zodiac": "鸡,兔,牛,鼠,猴,鸡,虎",
+      "oddEven": null,
+      "allOddEven": null,
+      "bigSmall": null,
+      "allBigSmall": null,
+      "firstsecend": 0,
+      "left3": null,
+      "mid3": null,
+      "right3": null,
+      "pet": null,
+      "pk": null,
+      "vs": null,
+      "verify": false,
+      "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
     }
   ],
-  "timestamp": 1780423901293
+  "timestamp": 1780511559508
 }
