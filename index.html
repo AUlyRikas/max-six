@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
-    <title>集成投票·预测</title>
+    <title>集成投票</title>
     <meta name="description" content="四模型集成投票AI预测">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -64,7 +64,7 @@
 </div>
 <div id="app" class="page-width" style="display:none;">
     <div class="logo-box">
-        <div style="font-size:30px;font-weight:bold;color:#ee0c0c;letter-spacing:4px;">四合一投票89%&75%</div>
+        <div style="font-size:30px;font-weight:bold;color:#0cdfee;letter-spacing:4px;">四 合 一 投 票</div>
     </div>
 
     <div class="daohang">
@@ -176,16 +176,24 @@ function loadLive(){
 
     // ★ 改动3：杀肖字段从 fixedKillSet 改为 killZodiacs ★
     var killSet = p.killZodiacs || [];
-    document.getElementById('predictResultArea').innerHTML=
-        '<div class="predict-card">'+
+    var predictHtml = '<div class="predict-card">'+
         '<div class="predict-title">下期预测 · '+p.nextIssue+'</div>'+
         '<div class="predict-subtitle">基于 '+p.issue+' | 开奖 '+p.code+' | 特肖 '+p.teSx+'(尾'+p.teWei+')</div>'+
         '<div class="predict-tags" style="justify-content:center;margin:10px 0;">'+p.sixPool.map(function(s){return '<span class="predict-tag green-tag">'+s+'</span>';}).join(' ')+'</div>'+
-        '<div class="predict-tags" style="justify-content:center;">'+
+        '<div style="text-align:center;font-size:14px;font-weight:normal;color:#8A2BE2;margin:8px 0;">'+
+            '★16码: <span style="font-weight:bold;">'+(p.numbers||[]).join(' . ')+'</span>'+
+        '</div>';
+    if (p.supplement && p.supplement.length > 0) {
+        predictHtml += '<div style="text-align:center;color:#888;font-size:0.9em;">'+
+            '补充号: '+(p.supplement||[]).join(' ')+
+        '</div>';
+    }
+    predictHtml += '<div class="predict-tags" style="justify-content:center;">'+
         (killSet.length?'<span class="predict-tag red-tag">杀肖: '+killSet.join('、')+'</span>':'')+
         ' '+
         (p.ninePool&&p.ninePool.length?'<span class="predict-tag">九肖池: '+p.ninePool.join('、')+'</span>':'')+
         '</div></div>';
+    document.getElementById('predictResultArea').innerHTML = predictHtml;
 }
 
 
