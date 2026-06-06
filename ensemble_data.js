@@ -97,8 +97,8 @@ var ensembleData = {
       "虎"
     ]
   },
-  "dynamicRate9": 70.0,
-  "dynamicRate6": 60.0,
+  "dynamicRate9": 72.72727272727273,
+  "dynamicRate6": 63.63636363636363,
   "votes": {
     "虎": 2,
     "兔": 2,
