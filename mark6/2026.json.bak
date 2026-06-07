@@ -9044,7 +9044,29 @@
       "vs": null,
       "verify": false,
       "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
+    },
+    {
+      "suit": null,
+      "expect": "2026157",
+      "openTime": "2026-06-06 21:32:32",
+      "type": "8",
+      "openCode": "43,25,11,31,17,10,40",
+      "wave": "green,blue,green,blue,green,blue,red",
+      "zodiac": "鼠,马,猴,鼠,虎,鸡,兔",
+      "oddEven": null,
+      "allOddEven": null,
+      "bigSmall": null,
+      "allBigSmall": null,
+      "firstsecend": 0,
+      "left3": null,
+      "mid3": null,
+      "right3": null,
+      "pet": null,
+      "pk": null,
+      "vs": null,
+      "verify": false,
+      "info": "macaujc.com 接口數據來源、邮件技術支持：service@macaujc.com"
     }
   ],
-  "timestamp": 1780677701624
+  "timestamp": 1780755075004
 }
