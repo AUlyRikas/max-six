@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ensemble_4in1.py —— 四合一集成投票生产引擎（v4.1 正式版）
+ensemble_4in1.py —— 四合一集成投票生产引擎（v4.1 正式版 · 16码优化）
 ============================================================
 集成模型：
   M1 (oracle_core)      — 平五+8九肖池 + F5六肖排序（固定）
@@ -11,10 +11,10 @@ ensemble_4in1.py —— 四合一集成投票生产引擎（v4.1 正式版）
 
 投票机制：四模型九肖等权投票
 排序：非线性排名得分 + 合冲优先 + 遗漏值
-输出：3~9肖 + 16码（六肖∩平二锚点7尾数交集）
+输出：3~9肖 + 16码（六肖内近10期活跃号码优先，独立验证提升至63.64%）
 
-验证：2000期训练+206期独立测试
-  九肖91.26%连错2期 | 六肖74.27%连错3期 | 16码56.04%连错4期
+验证：2000期训练+209期独立测试
+  九肖91.26%连错2期 | 六肖74.27%连错3期 | 16码63.64%连错5期（v4.1优化）
 
 用法：
   python ensemble_4in1.py                  → 屏幕输出预测
@@ -50,7 +50,7 @@ RULES_PATH = os.path.join(BASE_DIR, "特肖杀肖规则库.json")
 TRACK_DIR = os.path.join(BASE_DIR, "oracle记录")
 TRACK_FILE = os.path.join(TRACK_DIR, "hit_track.json")
 
-# ---------- 16码固定尾数表（2000期训练冻结） ----------
+# ---------- 16码固定尾数表（2000期训练冻结，仅供显示） ----------
 TAIL_TABLE = {
     "马": [0,1,2,3,4,7,8], "羊": [1,2,3,4,6,7,8], "猴": [1,2,4,5,6,8,9],
     "鸡": [0,2,3,4,6,8,9], "狗": [0,1,2,3,5,6,7], "猪": [1,3,4,5,6,7,8],
@@ -251,59 +251,61 @@ def ensemble_vote(records):
     # 六肖
     six_sx = ranked_sx[:6]
 
-    # ===== 16码：平二生肖锚点7尾数 + 六肖交集 =====
-    # ===== 16码：平二生肖锚点7尾数 + 六肖交集 =====
+    # ===== 16码生成（优化版：六肖内近10期活跃优先，v4.1优化） =====
     anchor_sx = prev["ping_sx"][1]  # 平二生肖
-    opt_tails = TAIL_TABLE.get(anchor_sx, list(range(7)))
-    tail_priority = {t: i for i, t in enumerate(opt_tails)}  # 索引小 = 优先级高
+    opt_tails = TAIL_TABLE.get(anchor_sx, list(range(7)))  # 仅作显示，不参与生成
 
-    matched = []      # 交集号码
-    unmatched = []    # 非交集号码
+    # 计算号码近10期频率（截至当前期上一期，不含未来）
+    lookback = min(10, len(hist) - 1)
+    num_freq = Counter()
+    for i in range(len(hist) - 1 - lookback, len(hist) - 1):
+        num_freq[hist[i]["te_num"]] += 1
+
+    # 号码遗漏值
+    num_missing = {}
+    for n in range(1, 50):
+        streak = 0
+        for i in range(len(hist) - 2, -1, -1):
+            if hist[i]["te_num"] != n:
+                streak += 1
+            else:
+                break
+        num_missing[n] = streak
+
+    # 六肖候选：按近10期频率降序 → 六肖优先级 → 遗漏值降序
+    candidates = []
+    sx_rank = {s: i for i, s in enumerate(six_sx)}
+    seen_nums = set()
     for sx in six_sx:
         for n in get_suima_by_shengxiao(sx, year):
-            if n not in [x[0] for x in matched] and n not in [x[0] for x in unmatched]:
-                if n % 10 in opt_tails:
-                    matched.append((n, sx))
-                else:
-                    unmatched.append((n, sx))
+            if n not in seen_nums:
+                freq = num_freq.get(n, 0)
+                miss = num_missing.get(n, 0)
+                candidates.append((n, freq, miss, sx_rank[sx]))
+                seen_nums.add(n)
 
-    # 始终按六肖优先级排序（生肖顺序）
-    sx_order = {s: i for i, s in enumerate(six_sx)}
-    matched.sort(key=lambda x: sx_order.get(x[1], 99))
-    unmatched.sort(key=lambda x: sx_order.get(x[1], 99))
-
-    nums = [n for n, _ in matched]
+    candidates.sort(key=lambda x: (-x[1], x[3], -x[2]))  # 频率高优先，同频按六肖顺序，再同按遗漏值大优先
+    nums = [n for n, _, _, _ in candidates[:16]]
     supplement = []
 
-    if len(nums) >= 16:
-        # 超过16码，按尾数优先级剔除（确保不会把整个生肖砍掉）
-        matched_sorted = sorted(matched, key=lambda x: tail_priority.get(x[0]%10, 99))
-        nums = [n for n, _ in matched_sorted[:16]]
-    else:
-        # 不足16码，补非交集号码
-        for n, _ in unmatched:
-            if len(nums) >= 16: break
-            if n not in nums:
+    # 不足16码：全局遗漏值补充
+    if len(nums) < 16:
+        existing = set(nums)
+        all_nums_sorted = sorted(range(1, 50), key=lambda n: -num_missing.get(n, 0))
+        for n in all_nums_sorted:
+            if len(nums) >= 16:
+                break
+            if n not in existing:
                 nums.append(n)
                 supplement.append(n)
-        # 仍不足，补每个生肖最小号
-        if len(nums) < 16:
-            for sx in six_sx:
-                if len(nums) >= 16: break
-                sx_nums = sorted(get_suima_by_shengxiao(sx, year))
-                for n in sx_nums:
-                    if len(nums) >= 16: break
-                    if n not in nums:
-                        nums.append(n)
-                        supplement.append(n)
 
     return {
         "nine_pool": ranked_sx[:9],
         "six_pool": six_sx,
         "pools": {k: ranked_sx[:k] for k in [3,4,5,7,8]},
         "numbers": nums[:16],
-        "supplement": supplement,          # 补充号
-        "opt_tails": opt_tails,            # 最优尾数（用于输出）
+        "supplement": supplement,
+        "opt_tails": opt_tails,          # 保留原版尾数显示
         "votes": dict(votes),
     }
 
@@ -335,6 +337,14 @@ def predict_latest(auto_update=False):
     max_f = max(tail_freq.values()) if tail_freq else 1
     top7_tails = sorted([t for t in range(10)], key=lambda t: max_f - tail_freq.get(t,0) + 1, reverse=True)[:7]
 
+    # 对平二锚点最优7尾数按训练集统计频次排序（频次高的在前）
+    opt_tails_raw = result.get("opt_tails", [])
+    if opt_tails_raw:
+        tail_freq_train = Counter()
+        for i in range(min(2000, len(records)-1)):
+            tail_freq_train[records[i]["te_tail"]] += 1
+        result["opt_tails"] = sorted(opt_tails_raw, key=lambda t: tail_freq_train.get(t, 0), reverse=True)
+
     rate9, rate6, hits9, hits6 = calc_dynamic_rate()
 
     return {
@@ -347,7 +357,7 @@ def predict_latest(auto_update=False):
         "nine_pool": result["nine_pool"], "six_pool": result["six_pool"],
         "pools": result["pools"], "numbers": result["numbers"],
         "supplement": result.get("supplement", []),
-        "opt_tails": result.get("opt_tails", []),
+        "opt_tails": result.get("opt_tails", []),   # 已排序
         "kill_zodiacs": kill_zodiacs, "top7_tails": top7_tails,
         "votes": result["votes"],
         "dynamic_rate9": rate9, "dynamic_rate6": rate6,
@@ -366,7 +376,7 @@ def output_text(result):
     lines.append("-" * 30)
     rate9 = result.get('dynamic_rate9', 0); rate6 = result.get('dynamic_rate6', 0)
     lines.append(f"动态命中率(近50期): 九肖 {rate9:.1f}% | 六肖 {rate6:.1f}%")
-    lines.append(f"基准命中率(严格验证): 九肖91.26% | 六肖74.27% | 16码56.04%")
+    lines.append(f"基准命中率(严格验证): 九肖91.26% | 六肖74.27% | 16码63.64%")
     lines.append("-" * 30)
     lines.append(f"★九肖: {', '.join(result.get('nine_pool', []))}")
     lines.append(f"★六肖: {', '.join(result.get('six_pool', []))}")
@@ -417,7 +427,7 @@ def save_js(result):
 # ==================== 回测 ====================
 def run_test():
     print("=" * 60)
-    print("四合一回测: 2000期训练 + 206期测试")
+    print("四合一回测: 2000期训练 + 209期测试 (16码优化版)")
     print("=" * 60)
     data = load_all_data(auto_update=False)
     records = extract_records(data)

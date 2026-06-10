@@ -188,7 +188,13 @@ function loadLive(){
             '补充号: '+(p.supplement||[]).join(' ')+
         '</div>';
     }
-    predictHtml += '<div class="predict-tags" style="justify-content:center;">'+
+    // ★ 新增：最优7尾数显示 ★
+    if (p.optTails && p.optTails.length > 0) {
+        predictHtml += '<div style="text-align:center;font-size:14px;font-weight:normal;color:#8A2BE2;margin:4px 0;">'+
+            '最优7尾数(平二锚点): '+(p.optTails||[]).join(' ')+
+        '</div>';
+    }
+        predictHtml += '<div class="predict-tags" style="justify-content:center;">'+
         (killSet.length?'<span class="predict-tag red-tag">杀肖: '+killSet.join('、')+'</span>':'')+
         ' '+
         (p.ninePool&&p.ninePool.length?'<span class="predict-tag">九肖池: '+p.ninePool.join('、')+'</span>':'')+
