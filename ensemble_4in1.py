@@ -375,7 +375,7 @@ def output_text(result):
 
 
 def save_js(result):
-    js_path = os.path.join(BASE_DIR, "ensemble_data.js")
+    js_path = os.path.join(BASE_DIR, "ensemble_data_4in1.js")
     js_data = {
         "time": result.get("latest_time", ""),
         "issue": result.get("latest_issue", ""),
