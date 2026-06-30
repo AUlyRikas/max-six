@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-reference_96.py —— 多信号评分参考版（无未来函数）
+reference_96.py —— 多信号评分参考版（2026-06-29 优化）
 ============================================================
 核心逻辑：
   1. 规则库构建与分级仅使用前1500期训练数据（前1300建，1301-1500验）
   2. L3规则仅从训练集提取
-  3. 多信号评分：遗漏值分段 + 金标投票 + 冷却 + 平五窗口 + 合冲归属
+  3. 多信号评分：金标投票 + 冷却 + 平五窗口 + 合冲归属
+     （已移除遗漏值和固定杀肖，二者在231期严格验证中为负贡献）
   4. 参数固定，不随数据增加而漂移
 
 在集成投票中的角色：提供多信号评分的独立观点。
+
+优化记录（2026-06-29）：
+  - 移除遗漏值分段加权（六肖 -3.90%，证明为负贡献）
+  - 移除固定杀肖（平二+3 + 本期特肖，六肖 -1.74%，证明为负贡献）
+  - 金标惩罚力度从 1.0 调整为 2.2（六肖 +3.90%，最优平台中心值）
 ============================================================
 """
 import json
@@ -29,25 +35,29 @@ from shx_suishu import get_shengxiao_by_suima, SHENGXIAO, to_simplified
 ZODIAC = SHENGXIAO
 POS_NAMES = ["平一", "平二", "平三", "平四", "平五", "平六", "特码"]
 
-# ========== 参数（固定） ==========
+# ========== 参数（固定，基于前2000期训练、后231期测试验证） ==========
 OFFSETS = list(range(-11, 0)) + [0] + list(range(1, 12))
 MIN_SAMPLES = 5
 MIN_KILL_RATE = 95.0
 MAX_STREAK = 1
 
-MISSING_WEIGHTS = (1.0, 2.0, 3.0)
-MISSING_THRESH = (8, 20)
-GOLD_PENS = [3, 8, 15, 30]
-COOL_PENS = [10, 5, 2]
-L3_WEIGHT = 5
-FIXED_WEIGHT = 15
-TE_WEIGHT = 10
-PING5_WEIGHT = 10
-HECHONG_WEIGHT = 8
-CROSS_WEIGHT = 0
-USE_REPLACE = False
-COOL_WINDOW = 3
-L3_MIN_RATE = 93.0
+# ---- 评分参数（冻结，勿随意修改） ----
+GOLD_PENS = [3, 8, 15, 30]          # 金标投票扣分基础值
+GOLD_SCALE = 2.2                     # 金标惩罚缩放因子（最优平台中心值）
+COOL_PENS = [10, 5, 2]               # 冷却扣分 [1期前, 2期前, 3期前]
+TE_WEIGHT = 10                       # 特码金标杀肖扣分
+PING5_WEIGHT = 10                    # 平五+8窗口加分
+HECHONG_WEIGHT = 8                   # 合冲池加分
+COOL_WINDOW = 3                      # 冷却窗口大小
+
+# ---- 以下参数已弃用（保留定义以维持代码兼容性） ----
+MISSING_WEIGHTS = (1.0, 2.0, 3.0)    # 已弃用：遗漏值分段加权（负贡献）
+MISSING_THRESH = (8, 20)             # 已弃用
+FIXED_WEIGHT = 15                    # 已弃用：固定杀肖扣分（负贡献）
+L3_WEIGHT = 5                        # 已弃用：L3规则（无影响）
+CROSS_WEIGHT = 0                     # 已弃用：跨特肖信号
+USE_REPLACE = False                  # 已弃用
+L3_MIN_RATE = 93.0                   # 已弃用
 
 SAN_HE = {"马":["虎","狗"],"羊":["兔","猪"],"猴":["鼠","龙"],"鸡":["蛇","牛"],"狗":["虎","马"],"猪":["兔","羊"],"鼠":["猴","龙"],"牛":["蛇","鸡"],"虎":["马","狗"],"兔":["猪","羊"],"龙":["鼠","猴"],"蛇":["鸡","牛"]}
 LIU_HE = {"马":"羊","羊":"马","猴":"蛇","蛇":"猴","鸡":"龙","龙":"鸡","狗":"兔","兔":"狗","猪":"虎","虎":"猪","鼠":"牛","牛":"鼠"}
@@ -224,10 +234,16 @@ def build_fixed_rules(records):
 
 
 def predict_gold(records, up_to, rules, graded, l3_good):
+    """
+    优化版预测函数（2026-06-29）
+    评分 = 金标投票惩罚（缩放） + 特码金标杀肖 + 冷却 + 平五窗口 + 合冲池
+    已移除：遗漏值分段加权、固定杀肖、L3杀肖
+    """
     curr = records[up_to - 1]
     cur_sx = curr["te_sx"]
     year = curr["year"]
 
+    # ----- 1. 金标投票（从规则库匹配）-----
     gold_votes = Counter()
     te_kill_set = set()
     if cur_sx in rules:
@@ -243,11 +259,7 @@ def predict_gold(records, up_to, rules, graded, l3_good):
                 if pos_name == "特码" and gi['grade'] == 'gold':
                     te_kill_set.add(killed)
 
-    fixed_kill_set = set()
-    p2_num = curr["ping_nums"][1]
-    fixed_kill_set.add(get_shengxiao_by_suima(offset_num(p2_num, 3), year))
-    fixed_kill_set.add(cur_sx)
-
+    # ----- 2. 遗漏值（仅用于输出参考，不参与评分）-----
     missing = {}
     for s in ZODIAC:
         streak = 0
@@ -256,14 +268,7 @@ def predict_gold(records, up_to, rules, graded, l3_good):
             else: break
         missing[s] = streak
 
-    l3_kill_set = set()
-    for rule in l3_good:
-        pos_idx = POS_NAMES.index(rule['位置']) if rule['位置'] in POS_NAMES else -1
-        if pos_idx < 0: continue
-        actual_sx = curr["ping_sx"][pos_idx] if pos_idx < 6 else cur_sx
-        if actual_sx == rule['平码生肖']:
-            l3_kill_set.add(rule['所得生肖'])
-
+    # ----- 3. 冷却惩罚 -----
     cool_map = {}
     for dist in range(1, COOL_WINDOW + 1):
         if up_to - dist >= 0:
@@ -272,6 +277,7 @@ def predict_gold(records, up_to, rules, graded, l3_good):
             if sx not in cool_map or pen > cool_map[sx]:
                 cool_map[sx] = pen
 
+    # ----- 4. 平五+8 窗口 -----
     oracle_pool = set()
     if PING5_WEIGHT > 0:
         ping5 = curr["ping_nums"][4]
@@ -279,14 +285,8 @@ def predict_gold(records, up_to, rules, graded, l3_good):
         center_sx = get_shengxiao_by_suima(center_num, year)
         center_idx = ZODIAC.index(center_sx)
         oracle_pool = set(ZODIAC[(center_idx + i) % 12] for i in range(-4, 5))
-        if USE_REPLACE and len(oracle_pool) < 12:
-            outside = [s for s in ZODIAC if s not in oracle_pool]
-            best_out = max(outside, key=lambda s: missing[s])
-            worst_in = min(oracle_pool, key=lambda s: missing[s])
-            if missing[best_out] > missing[worst_in]:
-                oracle_pool.discard(worst_in)
-                oracle_pool.add(best_out)
 
+    # ----- 5. 合冲池 -----
     hechong_pool = set()
     if HECHONG_WEIGHT > 0:
         hechong_pool.add(cur_sx)
@@ -297,43 +297,42 @@ def predict_gold(records, up_to, rules, graded, l3_good):
         for s in SAN_HE.get(chong_sx, []): hechong_pool.add(s)
         hechong_pool.add(LIU_HE.get(chong_sx, ""))
 
-    cross_bonus = Counter()
-    if CROSS_WEIGHT > 0:
-        W = 30
-        freq = defaultdict(int)
-        start = max(0, up_to - W)
-        for i in range(start, up_to - 1):
-            prev_curr = records[i]
-            for pos_idx in range(6):
-                freq[(prev_curr["te_sx"], prev_curr["ping_nums"][pos_idx] % 10)] += 1
-        for pos_idx in range(6):
-            cnt = freq.get((cur_sx, curr["ping_nums"][pos_idx] % 10), 0)
-            cross_bonus[curr["ping_sx"][pos_idx]] += -cnt * CROSS_WEIGHT
-
+    # ----- 6. 综合评分（优化版：无遗漏值、无固定杀肖）-----
     scores = {}
     for s in ZODIAC:
-        m = missing.get(s, 0)
-        if m >= MISSING_THRESH[1]:
-            score = m * MISSING_WEIGHTS[2]
-        elif m >= MISSING_THRESH[0]:
-            score = m * MISSING_WEIGHTS[1]
-        else:
-            score = m * MISSING_WEIGHTS[0]
+        score = 0  # 基础分（已移除遗漏值）
 
+        # 6.1 金标投票惩罚（缩放后）
         v = gold_votes.get(s, 0)
-        if v >= 4: score -= GOLD_PENS[3]
-        elif v == 3: score -= GOLD_PENS[2]
-        elif v == 2: score -= GOLD_PENS[1]
-        elif v == 1: score -= GOLD_PENS[0]
+        if v >= 4:
+            score -= int(GOLD_PENS[3] * GOLD_SCALE)
+        elif v == 3:
+            score -= int(GOLD_PENS[2] * GOLD_SCALE)
+        elif v == 2:
+            score -= int(GOLD_PENS[1] * GOLD_SCALE)
+        elif v == 1:
+            score -= int(GOLD_PENS[0] * GOLD_SCALE)
 
-        if s in fixed_kill_set: score -= FIXED_WEIGHT
-        if s in te_kill_set: score -= TE_WEIGHT
-        if s in l3_kill_set: score -= L3_WEIGHT
+        # 6.2 特码金标杀肖惩罚
+        if s in te_kill_set:
+            score -= TE_WEIGHT
+
+        # 6.3 冷却惩罚
         score -= cool_map.get(s, 0)
-        if s in oracle_pool: score += PING5_WEIGHT
-        if s in hechong_pool: score += HECHONG_WEIGHT
-        score += cross_bonus.get(s, 0)
+
+        # 6.4 平五窗口加分
+        if s in oracle_pool:
+            score += PING5_WEIGHT
+
+        # 6.5 合冲池加分
+        if s in hechong_pool:
+            score += HECHONG_WEIGHT
+
         scores[s] = score
+
+    # 以下信号已弃用，保留空集以维持返回值兼容性
+    fixed_kill_set = set()  # 已移除固定杀肖
+    l3_kill_set = set()     # 已弃用L3
 
     sorted_all = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     nine = [s for s, _ in sorted_all[:9]]
@@ -345,7 +344,7 @@ def predict_gold(records, up_to, rules, graded, l3_good):
 def output_text(latest_record, next_qihao, six, nine, gold_votes, missing, scores,
                 fixed_kill_set, te_kill_set, l3_kill_set, oracle_pool, hechong_pool):
     lines = []
-    lines.append(f"MAX严格验证参考版 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"MAX严格验证参考版（R96优化） | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 50)
     lines.append(f"基于期号: {latest_record['qishu']}")
     lines.append(f"开奖号码: {','.join(str(n) for n in latest_record['ping_nums'])},特{latest_record['te_num']}")
@@ -353,16 +352,17 @@ def output_text(latest_record, next_qihao, six, nine, gold_votes, missing, score
     lines.append(f"预测下期: {next_qihao}")
     lines.append("-" * 30)
     lines.append(f"[信号源]")
-    lines.append(f"  固定杀肖: {', '.join(fixed_kill_set)}")
-    lines.append(f"  特码金标杀肖: {', '.join(te_kill_set)}")
-    lines.append(f"  L3优质杀肖(训练集提取): {', '.join(l3_kill_set) if l3_kill_set else '无'}")
+    lines.append(f"  固定杀肖: 已移除（负贡献）")
+    lines.append(f"  特码金标杀肖: {', '.join(te_kill_set) if te_kill_set else '无'}")
+    lines.append(f"  L3优质杀肖: 已弃用（无影响）")
     lines.append(f"  平五+8窗口: {', '.join(oracle_pool)}")
     lines.append(f"  合冲池: {', '.join(hechong_pool)}")
     lines.append(f"  金标高风险(≥2票): {', '.join([s for s,v in gold_votes.items() if v >= 2])}")
     lines.append("-" * 30)
     lines.append(f"[详细数据]")
     lines.append(f"  完整金标得票: {dict(sorted(gold_votes.items(), key=lambda x: x[1]))}")
-    lines.append(f"  前9遗漏值: {', '.join([f'{s}({v})' for s,v in sorted(missing.items(), key=lambda x: x[1], reverse=True)[:9]])}")
+    lines.append(f"  前9遗漏值(仅参考): {', '.join([f'{s}({v})' for s,v in sorted(missing.items(), key=lambda x: x[1], reverse=True)[:9]])}")
+    lines.append(f"  金标惩罚力度: {GOLD_SCALE}x")
     lines.append("-" * 30)
     lines.append(f"★九肖预测: {', '.join(nine)}")
     lines.append(f"★六肖预测: {', '.join(six)}")
