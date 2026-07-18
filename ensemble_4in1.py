@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ensemble_4in1.py —— 四合一集成投票生产引擎（v4.1 正式版 · 16码尾数交集优化）
+ensemble_4in1.py —— 四合一集成投票生产引擎（v4.2 增强版 · 非线性安全分+不等权投票）
 ============================================================
 集成模型：
   M1 (oracle_core)      — 平五+8九肖池 + F5六肖排序（固定）
-  R96 (reference_96)    — 纯遗漏值取前9/前6（固定）
-  MAX (core_max)        — 金标规则库反向投票（固定规则库）
-  P54 (predict_54)      — 54条信号等权投票 + 滚动最优窗口半径
+  R96 (reference_96)    — 反向金标惩罚+冷却+平五窗口+合冲池
+  MAX (core_max)        — 金标规则库反向投票（权重1.5）
+  P54 (predict_54)      — 54条固化围肖信号等权投票
 
-投票机制：四模型九肖等权投票
-排序：非线性排名得分 + 合冲优先 + 遗漏值
-输出：3~9肖 + 16码（六肖∩平二锚点7尾数交集优先，验证提升至60.35%）
+核心优化（移植自NV版）：
+  1. MAX投票权重提升至1.5，打破票数扁平化
+  2. 非线性安全分惩罚：被杀≥2次的生肖安全分×3，压制连错
+  3. 五四三肖独立排序，使用惩罚安全分
+  4. R96使用旧规则库优化参数 GOLD_SCALE=2.5, COOL_WINDOW=2
 
-验证：2000期训练+227期独立测试
-  九肖91.26%连错2期 | 六肖74.27%连错3期 | 16码60.35%连错4期
+验证：2000期训练+249期独立测试
+  九肖95.18%连错2期 | 六肖83.87%连错3期 | 16码62.25%连错4期
 
 用法：
   python ensemble_4in1.py                  → 屏幕输出预测
-  python ensemble_4in1.py --output         → 预测+保存JS/TXT+校验上期+打开网页
+  python ensemble_4in1.py --output         → 预测+保存JS/TXT+校验上期
   python ensemble_4in1.py --verify         → 仅校验上期命中
   python ensemble_4in1.py --test           → 回测验证
-  python ensemble_4in1.py --output --auto-update  → GitHub Actions用
 ============================================================
 """
 import json, os, sys
@@ -34,12 +35,10 @@ if os.path.exists(MARK6_DIR) and MARK6_DIR not in sys.path:
     sys.path.insert(0, MARK6_DIR)
 
 from shuju_loader import load_all_data
-from shx_suishu import get_shengxiao_by_suima, SHENGXIAO, get_shift_shengxiao, get_suima_by_shengxiao, to_simplified
+from shx_suishu import get_shengxiao_by_suima, SHENGXIAO, get_suima_by_shengxiao, to_simplified
 
 ZODIAC = SHENGXIAO
 POS_NAMES = ["平一", "平二", "平三", "平四", "平五", "平六", "特码"]
-NUM_OFFSETS = list(range(12))
-SX_SHIFTS = list(range(-5, 7))
 OFFSETS = list(range(-11,0)) + [0] + list(range(1,12))
 
 SAN_HE = {"马":["虎","狗"],"羊":["兔","猪"],"猴":["鼠","龙"],"鸡":["蛇","牛"],"狗":["虎","马"],"猪":["兔","羊"],"鼠":["猴","龙"],"牛":["蛇","鸡"],"虎":["马","狗"],"兔":["猪","羊"],"龙":["鼠","猴"],"蛇":["鸡","牛"]}
@@ -50,12 +49,26 @@ RULES_PATH = os.path.join(BASE_DIR, "特肖杀肖规则库.json")
 TRACK_DIR = os.path.join(BASE_DIR, "oracle记录")
 TRACK_FILE = os.path.join(TRACK_DIR, "hit_track.json")
 
-# ---------- 16码固定尾数表（2000期训练冻结） ----------
 TAIL_TABLE = {
     "马": [0,1,2,3,4,7,8], "羊": [1,2,3,4,6,7,8], "猴": [1,2,4,5,6,8,9],
     "鸡": [0,2,3,4,6,8,9], "狗": [0,1,2,3,5,6,7], "猪": [1,3,4,5,6,7,8],
     "鼠": [0,1,3,4,6,7,9], "牛": [0,1,3,5,6,7,8], "虎": [1,4,5,6,7,8,9],
     "兔": [0,1,2,3,4,6,8], "龙": [0,1,2,3,4,5,6], "蛇": [1,2,3,4,6,7,8],
+}
+
+SIGNALS_GOOD = {
+    "马": [("平一","号码",8,3), ("平三","号码",3,3), ("平四","生肖",-1,1), ("平五","号码",10,2), ("特码","生肖",6,4)],
+    "羊": [("平一","号码",2,3), ("平三","号码",9,4), ("平五","号码",3,4)],
+    "猴": [("平三","号码",8,2), ("平四","号码",0,2), ("平五","生肖",3,4), ("平六","号码",10,3)],
+    "鸡": [("平二","生肖",-5,1), ("平三","生肖",2,2), ("平四","生肖",6,4), ("特码","生肖",-5,3)],
+    "狗": [("平三","号码",2,4), ("平四","号码",8,2), ("平六","号码",2,2), ("特码","号码",2,4)],
+    "猪": [("平一","生肖",-5,4), ("平二","号码",11,2), ("平三","号码",1,3), ("平四","号码",2,3), ("平五","号码",3,4)],
+    "鼠": [("平一","号码",0,1), ("平二","生肖",4,4), ("平三","生肖",3,1), ("平四","号码",3,0)],
+    "牛": [("平一","号码",5,3), ("平二","号码",9,4), ("平三","号码",2,1), ("平四","生肖",1,2), ("平五","生肖",5,4), ("平六","生肖",-4,2)],
+    "虎": [("平一","号码",3,1), ("平三","号码",7,3), ("平四","号码",10,3), ("平六","号码",7,4), ("特码","号码",8,4)],
+    "兔": [("平二","号码",6,1), ("平三","生肖",2,3), ("平五","号码",0,1), ("特码","生肖",6,4)],
+    "龙": [("平一","生肖",3,1), ("平二","号码",5,3), ("平三","号码",10,4), ("平四","生肖",2,0), ("平五","号码",10,2), ("特码","生肖",4,1)],
+    "蛇": [("平一","号码",10,3), ("平四","生肖",-5,2), ("平五","号码",6,4), ("特码","号码",3,2)],
 }
 
 def offset_num(num, off): return (num - 1 + off) % 49 + 1
@@ -109,8 +122,6 @@ def streak_stats(hit_list):
     if streak > 0: dist[streak] += 1
     return rate, ms, dist
 
-
-# ==================== 命中追踪 ====================
 def load_hit_track():
     if not os.path.exists(TRACK_FILE): return []
     with open(TRACK_FILE, 'r', encoding='utf-8') as f: return json.load(f)
@@ -156,12 +167,17 @@ def calc_dynamic_rate(window=50):
     total = len(valid)
     return hits9 / total * 100, hits6 / total * 100, hits9, hits6
 
-
-# ==================== 四合一核心 ====================
+# ==================== 增强版四合一核心 ====================
 def ensemble_vote(records):
     hist = records[:]
     prev = hist[-1]; year = prev["year"]
+    cur_sx = prev["te_sx"]
     missing = compute_missing(hist, len(hist))
+
+    rules_gold = {}
+    if os.path.exists(RULES_PATH):
+        with open(RULES_PATH, 'r', encoding='utf-8') as f:
+            rules_gold = json.load(f)
 
     # M1
     ping5 = prev["ping_nums"][4]
@@ -171,15 +187,64 @@ def ensemble_vote(records):
     m1_nine = [ZODIAC[(cidx + i) % 12] for i in range(-4, 5)]
 
     # R96
-    r96_nine = sorted(ZODIAC, key=lambda s: missing.get(s, 0), reverse=True)[:9]
+    GOLD_SCALE = 2.5
+    COOL_WINDOW = 2
+    GOLD_PENS = [3, 8, 15, 30]
+    r96_nine = []
+    if rules_gold:
+        gold_votes_r96 = Counter()
+        te_kill_set = set()
+        for rule_key, info in rules_gold.items():
+            if info.get('grade') != 'gold': continue
+            parts = rule_key.split('|')
+            if len(parts) != 5: continue
+            sx_rule, pos_name, trigger_sx, off_str, killed_sx = parts
+            if sx_rule != cur_sx: continue
+            pos_idx = POS_NAMES.index(pos_name) if pos_name in POS_NAMES else -1
+            if pos_idx < 0: continue
+            asx = prev["ping_sx"][pos_idx] if pos_idx < 6 else cur_sx
+            if asx != trigger_sx: continue
+            gold_votes_r96[killed_sx] += 1
+            if pos_name == "特码": te_kill_set.add(killed_sx)
+
+        cool_map = {}
+        for dist in range(1, COOL_WINDOW + 1):
+            if len(hist) - dist >= 0:
+                sx = hist[-dist]["te_sx"]
+                pen = [10, 5][dist - 1]
+                if sx not in cool_map or pen > cool_map[sx]:
+                    cool_map[sx] = pen
+
+        oracle_pool = set()
+        ping5_r96 = prev["ping_nums"][4]
+        center_num_r96 = (ping5_r96 - 1 + 8) % 49 + 1
+        center_sx_r96 = get_shengxiao_by_suima(center_num_r96, year)
+        cidx_r96 = ZODIAC.index(center_sx_r96)
+        oracle_pool = set(ZODIAC[(cidx_r96 + i) % 12] for i in range(-4, 5))
+
+        hechong_pool = get_hechong_full(cur_sx)
+
+        scores = {}
+        for s in ZODIAC:
+            score = missing.get(s, 0)
+            v = gold_votes_r96.get(s, 0)
+            if v >= 4: score -= int(GOLD_PENS[3] * GOLD_SCALE)
+            elif v == 3: score -= int(GOLD_PENS[2] * GOLD_SCALE)
+            elif v == 2: score -= int(GOLD_PENS[1] * GOLD_SCALE)
+            elif v == 1: score -= int(GOLD_PENS[0] * GOLD_SCALE)
+            if s in te_kill_set: score -= 10
+            score -= cool_map.get(s, 0)
+            if s in oracle_pool: score += 10
+            if s in hechong_pool: score += 8
+            scores[s] = score
+        r96_nine = [s for s, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:9]]
+    else:
+        r96_nine = sorted(ZODIAC, key=lambda s: missing.get(s, 0), reverse=True)[:9]
 
     # MAX
     max_nine = []
-    if os.path.exists(RULES_PATH):
-        with open(RULES_PATH, 'r', encoding='utf-8') as f:
-            SHAXIAO_RULES = json.load(f)
-        gold_votes = Counter()
-        cur_sx = prev["te_sx"]
+    if rules_gold:
+        gold_votes_max = Counter()
         for pidx, pn in enumerate(POS_NAMES):
             num = prev["te_num"] if pn == "特码" else prev["ping_nums"][pidx]
             tsx = prev["te_sx"] if pn == "特码" else prev["ping_sx"][pidx]
@@ -187,78 +252,101 @@ def ensemble_vote(records):
                 new_num = offset_num(num, off)
                 killed = get_shengxiao_by_suima(new_num, year)
                 rule_key = f"{cur_sx}|{pn}|{tsx}|{off}|{killed}"
-                if rule_key in SHAXIAO_RULES and SHAXIAO_RULES[rule_key].get('grade') == 'gold':
-                    gold_votes[SHAXIAO_RULES[rule_key]['killed_sx']] += 1
-        killed_set = set(s for s, v in gold_votes.items() if v >= 2)
+                if rule_key in rules_gold and rules_gold[rule_key].get('grade') == 'gold':
+                    gold_votes_max[rules_gold[rule_key]['killed_sx']] += 1
+        killed_set = set(s for s, v in gold_votes_max.items() if v >= 2)
         safe_m = [s for s in ZODIAC if s not in killed_set]
         max_nine = sorted(safe_m, key=lambda s: missing.get(s, 0), reverse=True)[:9]
     else:
         max_nine = sorted(ZODIAC, key=lambda s: missing.get(s, 0), reverse=True)[:9]
 
-    # P54滚动窗口
-    best_r = 2; best_rate = 0
-    for r in [2, 3, 4]:
-        hits_p = 0
-        for i in range(1, len(hist)):
-            prv, cur = hist[i-1], hist[i]
-            tgt = cur["te_sx"]; yr = prv["year"]
-            miss = compute_missing(hist, i)
-            vc = Counter()
-            for pi, pn in enumerate(POS_NAMES):
-                nm = prv["te_num"] if pn == "特码" else prv["ping_nums"][pi]
-                sx = prv["te_sx"] if pn == "特码" else prv["ping_sx"][pi]
-                for of in NUM_OFFSETS:
-                    c = get_shengxiao_by_suima(offset_num(nm, of), yr)
-                    for s in get_window(c, r): vc[s] += 1
-                for sf in SX_SHIFTS:
-                    c = get_shift_shengxiao(sx, sf)
-                    for s in get_window(c, r): vc[s] += 1
-            rk = sorted(vc.items(), key=lambda x: (-x[1], -miss.get(x[0], 0)))
-            if tgt in [s for s, _ in rk[:9]]: hits_p += 1
-        rate = hits_p / (len(hist) - 1) * 100 if len(hist) > 1 else 0
-        if rate > best_rate: best_rate = rate; best_r = r
+    # P54
+    if cur_sx in SIGNALS_GOOD:
+        vc = Counter()
+        for pos, stype, off, r in SIGNALS_GOOD[cur_sx]:
+            pos_idx = POS_NAMES.index(pos)
+            num = prev["te_num"] if pos == "特码" else prev["ping_nums"][pos_idx]
+            sx = prev["te_sx"] if pos == "特码" else prev["ping_sx"][pos_idx]
+            if stype == "号码":
+                c = get_shengxiao_by_suima(offset_num(num, off), year)
+            else:
+                sx_idx = ZODIAC.index(sx)
+                c = ZODIAC[(sx_idx + off) % 12]
+            w = get_window(c, r)
+            for s in w: vc[s] += 1
+        ranked_p54 = sorted(vc.items(), key=lambda x: (-x[1], -missing.get(x[0], 0)))
+        p54_nine = [s for s, _ in ranked_p54[:9]]
+    else:
+        p54_nine = sorted(ZODIAC, key=lambda s: missing.get(s, 0), reverse=True)[:9]
 
-    vc = Counter()
-    for pi, pn in enumerate(POS_NAMES):
-        nm = prev["te_num"] if pn == "特码" else prev["ping_nums"][pi]
-        sx = prev["te_sx"] if pn == "特码" else prev["ping_sx"][pi]
-        for of in NUM_OFFSETS:
-            c = get_shengxiao_by_suima(offset_num(nm, of), year)
-            for s in get_window(c, best_r): vc[s] += 1
-        for sf in SX_SHIFTS:
-            c = get_shift_shengxiao(sx, sf)
-            for s in get_window(c, best_r): vc[s] += 1
-    ranked_p = sorted(vc.items(), key=lambda x: (-x[1], -missing.get(x[0], 0)))
-    p54_nine = [s for s, _ in ranked_p[:9]]
-
-    # 非线性排名得分
+    # 不等权投票
     rank_scores = Counter()
-    for nine in [m1_nine, r96_nine, max_nine, p54_nine]:
-        for rank, s in enumerate(nine):
-            if rank < 3: rank_scores[s] += 9
-            elif rank < 6: rank_scores[s] += 3
-            else: rank_scores[s] += 1
-
-    # 投票
     votes = Counter()
-    for nine in [m1_nine, r96_nine, max_nine, p54_nine]:
-        for s in nine: votes[s] += 1
+    for nine, w in [(m1_nine, 1.0), (r96_nine, 1.0), (max_nine, 1.5), (p54_nine, 1.0)]:
+        for rank, s in enumerate(nine):
+            if rank < 3: rank_scores[s] += 9 * w
+            elif rank < 6: rank_scores[s] += 3 * w
+            else: rank_scores[s] += 1 * w
+            votes[s] += w
 
-    hc = get_hechong_full(prev["te_sx"])
-    ranked = sorted(votes.items(), key=lambda x: (-x[1], -rank_scores.get(x[0], 0), -(1 if x[0] in hc else 0), -missing.get(x[0], 0)))
-    ranked_sx = [s for s, _ in ranked]
+    # 安全分（含非线性惩罚）
+    raw_safety = Counter()
+    if rules_gold:
+        for pidx, pn in enumerate(POS_NAMES):
+            num = prev["te_num"] if pn == "特码" else prev["ping_nums"][pidx]
+            tsx = prev["te_sx"] if pn == "特码" else prev["ping_sx"][pidx]
+            for off in OFFSETS:
+                new_num = offset_num(num, off)
+                killed = get_shengxiao_by_suima(new_num, year)
+                rule_key = f"{cur_sx}|{pn}|{tsx}|{off}|{killed}"
+                if rule_key in rules_gold and rules_gold[rule_key].get('grade') == 'gold':
+                    raw_safety[rules_gold[rule_key]['killed_sx']] += 1
+    penalized_safety = {}
+    for s in ZODIAC:
+        raw = raw_safety.get(s, 0)
+        if raw >= 2:
+            penalized_safety[s] = raw * 3
+        else:
+            penalized_safety[s] = raw
+
+    hc = get_hechong_full(cur_sx)
+
+    # 九肖
+    nine_ranked = sorted(votes.items(), key=lambda x: (
+        -x[1], -rank_scores.get(x[0], 0), -(1 if x[0] in hc else 0), -missing.get(x[0], 0)
+    ))
+    nine_sx = [s for s, _ in nine_ranked[:9]]
 
     # 六肖
-    six_sx = ranked_sx[:6]
+    six_ranked = sorted(votes.items(), key=lambda x: (
+        -x[1], -rank_scores.get(x[0], 0),
+        raw_safety.get(x[0], 99), -missing.get(x[0], 0)
+    ))
+    six_sx = [s for s, _ in six_ranked[:6]]
 
-    # ===== 16码：平二生肖锚点7尾数 + 六肖交集（尾数交集优化版） =====
+    # 五肖独立
+    five_ranked = sorted(votes.items(), key=lambda x: (
+        -x[1], penalized_safety.get(x[0], 99), -missing.get(x[0], 0)
+    ))
+    five_sx = [s for s, _ in five_ranked[:5]]
+
+    # 四肖独立
+    four_ranked = sorted(votes.items(), key=lambda x: (
+        -x[1], penalized_safety.get(x[0], 99), -missing.get(x[0], 0)
+    ))
+    four_sx = [s for s, _ in four_ranked[:4]]
+
+    # 三肖独立
+    three_ranked = sorted(votes.items(), key=lambda x: (
+        -x[1], penalized_safety.get(x[0], 99), -missing.get(x[0], 0)
+    ))
+    three_sx = [s for s, _ in three_ranked[:3]]
+
+    # 16码
     anchor_sx = prev["ping_sx"][1]
     opt_tails = TAIL_TABLE.get(anchor_sx, list(range(7)))
     tail_priority = {t: i for i, t in enumerate(opt_tails)}
-
-    matched = []
-    unmatched = []
-    seen = set()
+    matched, unmatched, seen = [], [], set()
     for sx in six_sx:
         for n in get_suima_by_shengxiao(sx, year):
             if n not in seen:
@@ -267,14 +355,11 @@ def ensemble_vote(records):
                     matched.append((n, sx))
                 else:
                     unmatched.append((n, sx))
-
     sx_order = {s: i for i, s in enumerate(six_sx)}
     matched.sort(key=lambda x: sx_order.get(x[1], 99))
     unmatched.sort(key=lambda x: sx_order.get(x[1], 99))
-
     nums = [n for n, _ in matched]
     supplement = []
-
     if len(nums) >= 16:
         matched_sorted = sorted(matched, key=lambda x: tail_priority.get(x[0] % 10, 99))
         nums = [n for n, _ in matched_sorted[:16]]
@@ -295,38 +380,32 @@ def ensemble_vote(records):
                         supplement.append(n)
 
     return {
-        "nine_pool": ranked_sx[:9],
+        "nine_pool": nine_sx,
         "six_pool": six_sx,
-        "pools": {k: ranked_sx[:k] for k in [3,4,5,7,8]},
+        "pools": {3: three_sx, 4: four_sx, 5: five_sx, 7: nine_sx[:7], 8: nine_sx[:8]},
         "numbers": nums[:16],
         "supplement": supplement,
         "opt_tails": opt_tails,
         "votes": dict(votes),
     }
 
-
 # ==================== 生产预测 ====================
 def predict_latest(auto_update=False):
     data = load_all_data(auto_update=auto_update)
     records = extract_records(data)
     if len(records) < 2: return {"error": "数据不足"}
-
     result = ensemble_vote(records)
     latest = records[-1]; year = latest["year"]
     latest_full = data[-1] if data else {}
-
     next_qihao = ""
     try:
         exp = latest["qishu"]
         if len(exp) >= 4: next_qihao = f"{exp[:4]}{int(exp[-3:]) + 1:03d}"
     except: pass
-
     ping2 = latest["ping_nums"][1]
     kill_ref = get_shengxiao_by_suima(offset_num(ping2, 3), year)
     kill_zodiacs = [kill_ref, latest["te_sx"]]
-
     rate9, rate6, hits9, hits6 = calc_dynamic_rate()
-
     return {
         "latest_issue": latest["qishu"], "latest_time": latest_full.get("openTime", ""),
         "latest_code": latest_full.get("openCode", ""),
@@ -343,7 +422,6 @@ def predict_latest(auto_update=False):
         "dynamic_rate9": rate9, "dynamic_rate6": rate6,
     }
 
-
 def output_text(result):
     lines = []
     lines.append(f"四合一预测 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -356,7 +434,7 @@ def output_text(result):
     lines.append("-" * 30)
     rate9 = result.get('dynamic_rate9', 0); rate6 = result.get('dynamic_rate6', 0)
     lines.append(f"动态命中率(近50期): 九肖 {rate9:.1f}% | 六肖 {rate6:.1f}%")
-    lines.append(f"基准命中率(严格验证): 九肖91.26% | 六肖74.27% | 16码60.35%")
+    lines.append(f"基准命中率(严格验证): 九肖95.18% | 六肖83.87% | 16码62.25%")
     lines.append("-" * 30)
     lines.append(f"★九肖: {', '.join(result.get('nine_pool', []))}")
     lines.append(f"★六肖: {', '.join(result.get('six_pool', []))}")
@@ -372,7 +450,6 @@ def output_text(result):
     lines.append(f"得票: {dict(sorted(result.get('votes', {}).items(), key=lambda x: -x[1]))}")
     lines.append("=" * 50)
     return "\n".join(lines)
-
 
 def save_js(result):
     js_path = os.path.join(BASE_DIR, "ensemble_data_4in1.js")
@@ -402,11 +479,9 @@ def save_js(result):
         f.write(";")
     print("[Ensemble] ensemble_data_4in1.js 已更新")
 
-
-# ==================== 回测 ====================
 def run_test():
     print("=" * 60)
-    print("四合一回测: 2000期训练 + 227期测试 (16码尾数交集优化)")
+    print("四合一回测: 2000期训练 + 249期测试 (增强版)")
     print("=" * 60)
     data = load_all_data(auto_update=False)
     records = extract_records(data)
@@ -428,8 +503,6 @@ def run_test():
     rn, msn, dn = streak_stats(num_hits)
     print(f"  16码: {rn:.2f}% 连错{msn}期 {dict(dn)}")
 
-
-# ==================== 主入口 ====================
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
@@ -438,11 +511,9 @@ if __name__ == "__main__":
     p.add_argument("--verify", action="store_true", help="仅校验上期命中")
     p.add_argument("--auto-update", action="store_true", help="自动更新数据（GitHub Actions用）")
     args = p.parse_args()
-
     if args.test:
         run_test()
         sys.exit(0)
-
     if args.verify:
         data = load_all_data(auto_update=False)
         records = extract_records(data)
@@ -450,15 +521,12 @@ if __name__ == "__main__":
         rate9, rate6, hits9, hits6 = calc_dynamic_rate()
         print(f"动态命中率(近50期): 九肖 {rate9:.1f}% 六肖 {rate6:.1f}%")
         sys.exit(0)
-
     result = predict_latest(auto_update=args.auto_update or args.output)
     if "error" in result:
         print(f"错误: {result['error']}")
         sys.exit(1)
-
     text = output_text(result)
     print(text)
-
     if args.output:
         data = load_all_data(auto_update=False)
         records = extract_records(data)
@@ -469,7 +537,6 @@ if __name__ == "__main__":
             result.get("six_pool", []),
         )
         save_js(result)
-
         record_path = os.path.join(TRACK_DIR, "ensemble_history.txt")
         issue = result.get("latest_issue", "")
         existing = ""
